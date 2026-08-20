@@ -153,6 +153,7 @@ struct Inner {
     ffmpeg: bool,
     latest_preview: AtomicU64,
     samples: Mutex<Vec<IndexedFile>>,
+    index_gen: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -192,6 +193,7 @@ impl Engine {
             ffmpeg: which("ffmpeg").is_some(),
             latest_preview: AtomicU64::new(0),
             samples: Mutex::new(samples),
+            index_gen: AtomicU64::new(0),
         };
         Self {
             inner: Arc::new(inner),
@@ -199,11 +201,13 @@ impl Engine {
     }
 
     pub fn warmup_async(&self) {
-        if self.inner.indexing.swap(true, Ordering::SeqCst) {
-            return;
-        }
+        let gen = self.inner.index_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let inner = self.inner.clone();
-        thread::spawn(move || warmup_loop(inner));
+        thread::spawn(move || warmup_loop(inner, gen));
+    }
+
+    pub fn index_generation(&self) -> u64 {
+        self.inner.index_gen.load(Ordering::SeqCst)
     }
 
     pub fn handle_line(&self, line: &str) -> String {
@@ -226,7 +230,9 @@ impl Engine {
             "theme" => self.do_theme(&req),
             "warmup" => {
                 self.warmup_async();
-                Response::ok(req.id)
+                let mut resp = Response::ok(req.id);
+                resp.indexing = Some(true);
+                resp
             }
             "config" => self.do_config(&req),
             other => Response::error(req.id, format!("unknown cmd {other}")),
@@ -431,7 +437,14 @@ impl Engine {
     }
 }
 
-fn warmup_loop(inner: Arc<Inner>) {
+fn still_current(inner: &Inner, gen: u64) -> bool {
+    inner.index_gen.load(Ordering::SeqCst) == gen
+}
+
+fn warmup_loop(inner: Arc<Inner>, gen: u64) {
+    if !still_current(&inner, gen) {
+        return;
+    }
     inner.indexing.store(true, Ordering::SeqCst);
     inner.progress_cents.store(0, Ordering::SeqCst);
     let cfg = inner.cfg.lock().unwrap().clone();
@@ -444,13 +457,20 @@ fn warmup_loop(inner: Arc<Inner>) {
     let samples = search::demo_files(&cfg.samples_dir);
     *inner.samples.lock().unwrap() = samples.clone();
     let collected = search::walk_index(&walk_cfg, |batch, seen| {
+        if !still_current(&inner, gen) {
+            return false;
+        }
         let cap = walk_cfg.max_files.max(1);
         let pct = ((seen.min(cap) as f32 / cap as f32) * 10000.0) as u32;
         inner.progress_cents.store(pct.min(9999), Ordering::SeqCst);
         let merged = search::merge_unique(samples.clone(), batch.to_vec());
         *inner.files.lock().unwrap() = merged;
         *inner.backend.lock().unwrap() = "index-warming".into();
+        true
     });
+    if !still_current(&inner, gen) {
+        return;
+    }
     let merged = search::merge_unique(samples, collected);
     if let Ok(db) = inner.frecency.lock() {
         let _ = db.replace_files(&merged);
@@ -460,17 +480,23 @@ fn warmup_loop(inner: Arc<Inner>) {
     *inner.backend.lock().unwrap() = "index".into();
     inner.indexing.store(false, Ordering::SeqCst);
 
-    let dirs = search::top_dirs(&merged, cfg.watch_cap as usize);
-    inner
-        .watch_count
-        .store(dirs.len() as u32, Ordering::SeqCst);
     let mut last_full = std::time::Instant::now();
     loop {
+        if !still_current(&inner, gen) {
+            return;
+        }
         thread::sleep(Duration::from_secs(3));
-        let extra = inner.cfg.lock().unwrap().extra_exclude.clone();
+        if !still_current(&inner, gen) {
+            return;
+        }
+        let cfg = inner.cfg.lock().unwrap().clone();
         let mut current = inner.files.lock().unwrap().clone();
+        let dirs = search::top_dirs(&current, cfg.watch_cap as usize);
+        inner
+            .watch_count
+            .store(dirs.len() as u32, Ordering::SeqCst);
         for dir in &dirs {
-            let kids = search::rescan_dir(dir, &extra);
+            let kids = search::rescan_dir(dir, &cfg.extra_exclude);
             for kid in kids {
                 if let Some(existing) = current.iter_mut().find(|f| f.path == kid.path) {
                     *existing = kid;
@@ -480,7 +506,9 @@ fn warmup_loop(inner: Arc<Inner>) {
             }
         }
         if last_full.elapsed() > Duration::from_secs(90) {
-            let cfg = inner.cfg.lock().unwrap().clone();
+            if !still_current(&inner, gen) {
+                return;
+            }
             let walk_cfg = WalkConfig {
                 roots: cfg.roots.clone(),
                 extra_exclude: cfg.extra_exclude.clone(),
@@ -488,15 +516,18 @@ fn warmup_loop(inner: Arc<Inner>) {
                 max_depth: 16,
             };
             let samples = search::demo_files(&cfg.samples_dir);
-            let collected = search::walk_index(&walk_cfg, |_, _| {});
+            let collected = search::walk_index(&walk_cfg, |_, _| still_current(&inner, gen));
+            if !still_current(&inner, gen) {
+                return;
+            }
             current = search::merge_unique(samples, collected);
             last_full = std::time::Instant::now();
             if let Ok(db) = inner.frecency.lock() {
                 let _ = db.replace_files(&current);
             }
         }
-        if current.len() > inner.cfg.lock().unwrap().max_files {
-            current.truncate(inner.cfg.lock().unwrap().max_files);
+        if current.len() > cfg.max_files {
+            current.truncate(cfg.max_files);
         }
         *inner.files.lock().unwrap() = current;
     }
@@ -552,5 +583,18 @@ mod tests {
         let st = resp.status.unwrap();
         assert_eq!(st.helper, "rust");
         assert_eq!(st.version, VERSION);
+    }
+
+    #[test]
+    fn config_bumps_index_generation() {
+        let eng = test_engine();
+        assert_eq!(eng.index_generation(), 0);
+        eng.warmup_async();
+        let g1 = eng.index_generation();
+        assert!(g1 >= 1);
+        let _ = eng.handle(
+            protocol::parse(r#"{"id":3,"cmd":"config","roots":["/tmp"],"watchCap":32}"#).unwrap(),
+        );
+        assert!(eng.index_generation() > g1);
     }
 }

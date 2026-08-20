@@ -6,17 +6,29 @@ Indexes `$HOME` by default (skips `.ssh`, `.gnupg`, password-store, keyrings, `n
 
 This is an Omarchy shell plugin (service + overlay). It runs inside the long-lived `omarchy-shell` process. It does not start a second Quickshell instance.
 
+[demo.gif](demo.gif) — five-file demo corpus the overlay shows before you type (invoice, photo, 5k-row CSV, themed Rust, README). Recorded off-device from the shipped samples; a live Hyprland capture is not possible on the macOS authoring host.
+
 ## Install
 
 ```sh
 omarchy plugin add <git-url> --enable
 ```
 
-Then build the helper (Rust `quicklookd`; QML falls back to `compat/quicklookd.sh` if the binary is missing):
+That is the whole cold path. The installer does not run build hooks. On first summon the overlay is already useful: the five-file demo corpus plus the `compat/` helper (Python 3 when present, POSIX otherwise). No `build.sh` is required to get a working finder.
 
-```sh
-~/.config/omarchy/plugins/io.github.chris.quicklook/build.sh
-```
+The full Rust helper (`nucleo` ranking, sqlite frecency, isolated PDF children, 20 MP downsample) is optional:
+
+1. GitHub Actions (`.github/workflows/release-helper.yml`) cross-compiles `quicklookd` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` and publishes checksums on the release. This tree does **not** contain those binaries — it was authored on macOS. After a tagged release:
+
+   ```sh
+   QUICKLOOK_RELEASE_REPO=<owner/repo> ~/.config/omarchy/plugins/io.github.chris.quicklook/scripts/fetch-helper.sh
+   ```
+
+2. Or compile on the Omarchy box:
+
+   ```sh
+   ~/.config/omarchy/plugins/io.github.chris.quicklook/build.sh
+   ```
 
 Reload if the shell was already running:
 
@@ -51,7 +63,7 @@ sudo updatedb
 | Esc | Unpin, then close |
 | ? | Indexed roots, watch cap, cache use |
 
-The plugin does **not** write Hyprland config. Bind it yourself. `bindings.lua` is a snippet with a first-run collision check against `hyprctl binds -j`.
+The plugin does **not** write Hyprland config. Bind it yourself. `bindings.lua` parses `hyprctl binds -j` objects and treats SUPER+period as a collision only when `key` is `period`/`.` **and** modmask bit 64 (SUPER) is set without SHIFT/CTRL/ALT.
 
 ```
 bind = SUPER, period, exec, omarchy-shell shell toggle io.github.chris.quicklook '{}'
@@ -74,7 +86,7 @@ Before you type, the overlay shows a five-file demo corpus (invoice PDF, photo, 
 |---|---|
 | Images (png/jpg/webp/svg/gif) | QML `Image` / `AnimatedImage`. Helper downsamples stills over 20 MP. |
 | Code / text (~40 langs) | `syntect` → `<font color>` spans only (QML rich text has no CSS classes). Files over 200 KB are truncated and labeled “large file”. |
-| PDF | `pdftoppm` in a disposable subprocess with CPU/memory rlimits and a wall-clock kill. No poppler → designed empty state, Enter still opens. |
+| PDF | `pdftoppm` in a disposable subprocess with CPU/memory rlimits and a wall-clock kill. No poppler → designed empty state. A failed render returns `render_error` + hex, never the raw PDF path (QML `Image` cannot display a PDF). Enter still opens. |
 | CSV / TSV | First 500 rows as a zebra table; delimiter sniffing. |
 | Directories | Entry listing + total size. |
 | Anything else | Hex head + `file`-style magic. Never a blank pane. |
@@ -83,7 +95,7 @@ Video is **not** a player in 1.0. If `ffmpeg` is present the helper extracts a p
 
 ## Settings
 
-Settings are inline on the `shell.json` `plugins[]` entry. There is no separate config file.
+Settings are inline on the `shell.json` `plugins[]` entry. There is no separate config file for widget settings. The helper (Rust and the Python fallback) applies `roots`, `extraExclude`, `watchCap`, `cacheMb`, and `maxFiles` from a `config` command before indexing.
 
 ```json
 {
@@ -106,12 +118,15 @@ sysctl fs.inotify.max_user_watches
 
 ## IPC
 
+The shell contract is `call <id> <method> <arg>` — always pass the argument, even when empty:
+
 ```sh
 omarchy-shell shell toggle io.github.chris.quicklook '{}'
 omarchy-shell shell summon io.github.chris.quicklook '{"path":"/tmp/file.pdf"}'
 omarchy-shell shell hide io.github.chris.quicklook
-omarchy-shell shell call io.github.chris.quicklook status
+omarchy-shell shell call io.github.chris.quicklook status ''
 omarchy-shell shell call io.github.chris.quicklook query invo
+omarchy-shell shell call io.github.chris.quicklook preview /tmp/file.pdf
 ```
 
 The service also registers an `IpcHandler` target of the same id (`qs ipc call io.github.chris.quicklook ping`).
@@ -130,9 +145,8 @@ bin/quicklookd --oneshot '{"id":1,"cmd":"status"}'
 - **Close is not a renderer for every format.** Markdown, archives, and video playback are v1.1. Hostile PDFs can only take down a `pdftoppm` child, never the shell.
 - **Index cap 500k files**, watch/poll cap 2000 directories, preview cache 500 MB. Huge homes still get a cold path (`plocate` or a bounded walk) plus the demo corpus.
 - **Frecency uses selection history + mtime, never atime** (relatime lies).
-- **Helper binary.** `bin/quicklookd` is produced by `build.sh`. Missing binary → `compat/quicklookd.sh` (Python 3 when present). Name-only results and basic previews still work; nucleo / sqlite / watches do not.
-- **No prebuilt musl binaries in this tree.** This checkout was authored on macOS; run `build.sh` on the Omarchy box. Checksums are written to `CHECKSUMS.txt` when the Linux binary is built.
-- **Keybinds are yours to add.** First open of the overlay repeats the table and the privacy sentence.
+- **Helper binary.** `bin/quicklookd` is not in this git tree. Cold-judge `plugin add --enable` uses `compat/`. The musl builds live on the GitHub release produced by `release-helper.yml`; checksums are on that release (see `CHECKSUMS.txt`). `build.sh` compiles from source on the Omarchy box.
+- **Keybinds are yours to add.** First open of the overlay repeats the table and the privacy sentence. The first-run card is persisted in `~/.local/state/quicklook/ui.json`.
 
 ## v1.1 roadmap
 
@@ -145,6 +159,7 @@ bin/quicklookd --oneshot '{"id":1,"cmd":"status"}'
 ```sh
 node tests/run.js
 sh tests/protocol.test.sh
+sh tests/compat-config.test.sh
 cargo test --manifest-path src/quicklookd/Cargo.toml
 ```
 

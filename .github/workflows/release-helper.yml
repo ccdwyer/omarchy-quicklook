@@ -1,0 +1,69 @@
+name: release-helper
+
+# Builds static musl quicklookd binaries for x86_64 and aarch64.
+# This checkout is authored on macOS and cannot produce those binaries locally.
+# Tag a release (v*) or run this workflow by hand; attach the artifacts to the
+# GitHub release. Checksums are written to CHECKSUMS.txt on the release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  musl:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --manifest-path src/quicklookd/Cargo.toml
+      - name: Stage
+        run: |
+          mkdir -p dist
+          src="src/quicklookd/target/${{ matrix.target }}/release/quicklookd"
+          test -x "$src"
+          cp "$src" "dist/quicklookd-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quicklookd-${{ matrix.target }}
+          path: dist/quicklookd-${{ matrix.target }}
+
+  checksums:
+    needs: musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum quicklookd-* | tee ../CHECKSUMS.txt
+          cat ../CHECKSUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CHECKSUMS
+          path: CHECKSUMS.txt
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" --generate-notes --title "${{ github.ref_name }}" || true
+          gh release upload "${{ github.ref_name }}" dist/quicklookd-* CHECKSUMS.txt --clobber

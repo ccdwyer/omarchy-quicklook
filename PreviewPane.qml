@@ -20,6 +20,14 @@ Item {
 
   readonly property string kind: String(preview && preview.kind ? preview.kind : "")
   readonly property bool needPoppler: preview && preview.need_poppler === true
+  readonly property bool renderError: preview && preview.render_error === true
+  readonly property bool pdfRaster: {
+    if (root.kind !== "pdf" || root.needPoppler || root.renderError)
+      return false
+    if (!preview || !preview.path)
+      return false
+    return Format.isRasterPath(preview.path)
+  }
   readonly property bool largeFile: preview && (preview.large === true || preview.capped === true)
 
   function cellText(row, col) {
@@ -77,7 +85,7 @@ Item {
     // image / pdf raster / video poster
     Item {
       anchors.fill: parent
-      visible: (root.kind === "image" || (root.kind === "pdf" && preview.path && !root.needPoppler)) && !root.loading
+      visible: (root.kind === "image" || root.pdfRaster) && !root.loading
 
       Canvas {
         id: checker
@@ -101,7 +109,7 @@ Item {
 
       Rectangle {
         id: pdfShadow
-        visible: root.kind === "pdf"
+        visible: root.pdfRaster
         anchors.centerIn: parent
         width: raster.paintedWidth + 8
         height: raster.paintedHeight + 8
@@ -136,7 +144,7 @@ Item {
         anchors.bottom: parent.bottom
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottomMargin: Style.space(8)
-        visible: root.kind === "pdf" && preview.page_count
+        visible: root.pdfRaster && preview.page_count
         text: "page " + (preview.page || 1) + " / " + preview.page_count + "   j/k to turn"
         color: root.foreground
         opacity: 0.65
@@ -145,16 +153,16 @@ Item {
       }
     }
 
-    // poppler missing
+    // poppler missing / render error
     Column {
       anchors.centerIn: parent
       width: parent.width - Style.space(48)
       spacing: Style.space(10)
-      visible: root.kind === "pdf" && root.needPoppler
+      visible: root.kind === "pdf" && (root.needPoppler || root.renderError) && !root.pdfRaster
 
       Text {
         width: parent.width
-        text: "install poppler for PDF previews"
+        text: root.needPoppler ? "install poppler for PDF previews" : (preview.label || "couldn't render this page")
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.title
@@ -163,13 +171,25 @@ Item {
       }
       Text {
         width: parent.width
-        text: "pacman -S poppler  ·  then rescan plugins. The file is still openable with Enter."
+        text: root.needPoppler
+              ? "pacman -S poppler  ·  then rescan plugins. The file is still openable with Enter."
+              : "Enter still opens the file in the default app."
         color: root.foreground
         opacity: 0.6
         wrapMode: Text.WordWrap
         horizontalAlignment: Text.AlignHCenter
         font.family: root.fontFamily
         font.pixelSize: Style.font.body
+      }
+      Text {
+        width: parent.width
+        visible: !!preview.hex
+        text: preview.hex || ""
+        color: root.foreground
+        opacity: 0.7
+        wrapMode: Text.NoWrap
+        font.family: root.monoFamily
+        font.pixelSize: Style.font.caption
       }
     }
 

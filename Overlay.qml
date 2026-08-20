@@ -9,6 +9,7 @@ import "js/Config.js" as Config
 import "js/Theme.js" as Theme
 import "js/Format.js" as Format
 import "js/Fallback.js" as Fallback
+import "js/Binds.js" as Binds
 
 Item {
   id: root
@@ -272,6 +273,9 @@ Item {
   function dismissFirstRun() {
     Config.markFirstRunShown()
     root.firstRun = false
+    var svc = root.serviceRef()
+    if (svc && typeof svc.markFirstRun === "function")
+      svc.markFirstRun()
   }
 
   function setEmpty(reason, detail) {
@@ -354,8 +358,7 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var t = String(text || "")
-        root.bindCollision = t.indexOf("\"key\": \"period\"") >= 0 || t.indexOf("\"key\":\".\"") >= 0
+        root.bindCollision = Binds.superPeriodBound(text)
       }
     }
   }

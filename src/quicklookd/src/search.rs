@@ -144,7 +144,7 @@ pub struct WalkConfig {
     pub max_depth: usize,
 }
 
-pub fn walk_index(cfg: &WalkConfig, mut on_batch: impl FnMut(&[IndexedFile], usize)) -> Vec<IndexedFile> {
+pub fn walk_index(cfg: &WalkConfig, mut on_batch: impl FnMut(&[IndexedFile], usize) -> bool) -> Vec<IndexedFile> {
     let mut out = Vec::new();
     let mut seen = 0usize;
     for root in &cfg.roots {
@@ -176,8 +176,8 @@ pub fn walk_index(cfg: &WalkConfig, mut on_batch: impl FnMut(&[IndexedFile], usi
             if let Some(rec) = IndexedFile::from_path(ent.path()) {
                 out.push(rec);
                 seen += 1;
-                if seen % 400 == 0 {
-                    on_batch(&out, seen);
+                if seen % 400 == 0 && !on_batch(&out, seen) {
+                    return out;
                 }
                 if out.len() >= cfg.max_files {
                     return out;
@@ -185,7 +185,7 @@ pub fn walk_index(cfg: &WalkConfig, mut on_batch: impl FnMut(&[IndexedFile], usi
             }
         }
     }
-    on_batch(&out, seen);
+    let _ = on_batch(&out, seen);
     out
 }
 
@@ -193,7 +193,7 @@ pub fn bounded_walk_query(cfg: &WalkConfig, query: &str, budget: usize) -> Vec<I
     let mut limited = cfg.clone();
     limited.max_files = budget;
     limited.max_depth = limited.max_depth.min(8);
-    let files = walk_index(&limited, |_, _| {});
+    let files = walk_index(&limited, |_, _| true);
     if query.is_empty() {
         return files.into_iter().take(40).collect();
     }

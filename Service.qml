@@ -5,6 +5,7 @@ import "js/Protocol.js" as Protocol
 import "js/Config.js" as Config
 import "js/Fallback.js" as Fallback
 import "js/Theme.js" as Theme
+import "js/Format.js" as Format
 
 Item {
   id: root
@@ -33,6 +34,12 @@ Item {
   property var extraExclude: []
 
   readonly property string home: Quickshell.env("HOME") || "/tmp"
+  readonly property string stateDir: {
+    var xdg = Quickshell.env("XDG_STATE_HOME")
+    if (xdg && xdg.length)
+      return xdg + "/quicklook"
+    return home + "/.local/state/quicklook"
+  }
   readonly property string helperBin: pluginDir + "/bin/quicklookd"
   readonly property string helperSh: pluginDir + "/compat/quicklookd.sh"
 
@@ -115,8 +122,34 @@ Item {
   }
 
   function enqueueOneshot(obj) {
+    if (obj && (obj.cmd === "preview" || obj.cmd === "prefetch" || obj.cmd === "page")) {
+      var kept = []
+      for (var i = 0; i < oneshotQueue.length; i++) {
+        var c = oneshotQueue[i].cmd
+        var same = obj.cmd === "prefetch" ? c === "prefetch" : (c === "preview" || c === "page")
+        if (!same)
+          kept.push(oneshotQueue[i])
+      }
+      oneshotQueue = kept
+    }
     oneshotQueue.push(obj)
     runOneshot()
+  }
+
+  function dispatchPending() {
+    var nextPrev = Protocol.takeReadyPreview()
+    if (nextPrev)
+      root.send(nextPrev)
+    var nextPref = Protocol.takeReadyPrefetch()
+    if (nextPref)
+      root.send(nextPref)
+  }
+
+  function applyLocalPreview(id, path) {
+    Protocol.dropInFlight(id)
+    root.lastPreview = Format.localPreview(path)
+    root.previewRevision += 1
+    root.dispatchPending()
   }
 
   property var oneshotQueue: []
@@ -150,9 +183,14 @@ Item {
         root.backend = String(msg.backend)
       root.resultsRevision += 1
     } else if (msg.kind === "preview") {
-      if (!Protocol.acceptPreview(msg))
+      var inflightPath = Protocol.pathForInFlight(msg.id)
+      var accepted = Protocol.acceptPreview(msg)
+      root.dispatchPending()
+      if (!accepted)
         return
-      root.lastPreview = msg.preview || {}
+      if (msg.error === "stale" && !msg.preview)
+        return
+      root.lastPreview = msg.preview || Format.localPreview(inflightPath)
       root.previewRevision += 1
     } else if (msg.kind === "status") {
       root.lastCaps = msg.status || {}
@@ -170,8 +208,14 @@ Item {
         root.backend = String(msg.status.backend)
       root.statusRevision += 1
     } else if (msg.kind === "error") {
+      var errPath = Protocol.pathForInFlight(msg.id)
+      var wasPreview = Protocol.isInFlight(msg.id)
       Protocol.dropInFlight(msg.id)
       root.lastStatus = "error:" + String(msg.error || "")
+      if (wasPreview)
+        root.applyLocalPreview(msg.id, errPath)
+      else
+        root.dispatchPending()
     } else if (msg.kind === "ok") {
       root.lastStatus = "ok"
     }
@@ -199,17 +243,17 @@ Item {
 
   function preview(path, page) {
     var req = Protocol.previewRequest(path, page)
-    Protocol.markPreview(req.id)
-    root.send(req)
+    var ready = Protocol.queueOrStartPreview(req)
+    if (ready)
+      root.send(ready)
     return req.id
   }
 
   function prefetch(path) {
-    if (!Protocol.canStartPrefetch())
-      return 0
     var req = Protocol.prefetchRequest(path)
-    Protocol.markPrefetch(req.id)
-    root.send(req)
+    var ready = Protocol.queueOrStartPrefetch(req)
+    if (ready)
+      root.send(ready)
     return req.id
   }
 
@@ -332,7 +376,6 @@ Item {
         root.lastStatus = "running"
         Qt.callLater(function() {
           root.pushConfig()
-          root.warmup()
           root.requestStatus()
           root.pingSent = true
         })
@@ -351,10 +394,13 @@ Item {
       var text = oneshotOut.text
       var job = root.oneshotCurrent
       root.oneshotCurrent = null
-      if (text && String(text).trim().length)
+      if (text && String(text).trim().length) {
         root.onHelperLine(String(text).trim().split("\n").pop())
-      else if (job && job.cmd === "query")
+      } else if (job && job.cmd === "query") {
         root.localQuery(job.q || "")
+      } else if (job && (job.cmd === "preview" || job.cmd === "prefetch" || job.cmd === "page")) {
+        root.applyLocalPreview(job.id, job.path)
+      }
       root.runOneshot()
     }
   }
@@ -435,11 +481,36 @@ Item {
       } catch (e) {}
       return "ok"
     }
+    function markFirstRun(): string { return root.markFirstRun() }
+  }
+
+  function markFirstRun() {
+    Config.markFirstRunShown()
+    uiFile.setText(Config.serializeUi())
+    return "ok"
+  }
+
+  FileView {
+    id: uiFile
+    path: root.stateDir + "/ui.json"
+    atomicWrites: true
+    printErrors: false
+    watchChanges: false
+    onLoaded: Config.loadUi(text())
+    onLoadFailed: {}
+  }
+
+  Process {
+    id: mkdirState
+    command: ["mkdir", "-p", root.stateDir]
+    running: false
+    onExited: uiFile.reload()
   }
 
   Component.onCompleted: {
     root.applyHostSettings()
     Protocol.reset()
+    mkdirState.running = true
     whichProc.running = true
   }
 

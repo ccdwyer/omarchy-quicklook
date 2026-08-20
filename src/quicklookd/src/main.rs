@@ -6,7 +6,8 @@ fn main() {
     let oneshot = args.iter().any(|a| a == "--oneshot");
     let cfg = AppConfig::from_env_and_args(&args);
     let engine = Engine::new(cfg);
-    engine.warmup_async();
+    // Indexing starts on `config` / `warmup` so inline shell.json roots
+    // win the first walk. Oneshot queries use plocate / a bounded walk.
 
     if oneshot {
         let payload = oneshot_payload(&args);

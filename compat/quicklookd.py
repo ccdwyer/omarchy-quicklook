@@ -16,7 +16,81 @@ from pathlib import Path
 PLUGIN_DIR = Path(os.environ.get("QUICKLOOK_PLUGIN_DIR", Path(__file__).resolve().parent.parent))
 SAMPLES = PLUGIN_DIR / "samples"
 HOME = Path(os.environ.get("HOME", "/tmp"))
+STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "quicklook"
 CACHE = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "quicklook"
+SETTINGS_PATH = STATE / "compat-config.json"
+
+DEFAULT_SKIP = (
+    ".ssh",
+    ".gnupg",
+    ".password-store",
+    "node_modules",
+    "target",
+    ".git",
+    ".hg",
+    "keyrings",
+    "kwalletd",
+)
+
+SETTINGS = {
+    "roots": [str(HOME)],
+    "extraExclude": [],
+    "watchCap": 2000,
+    "cacheMb": 500,
+    "maxFiles": 500000,
+}
+
+
+def _expand(p: str) -> str:
+    if p == "~":
+        return str(HOME)
+    if p.startswith("~/"):
+        return str(HOME / p[2:])
+    return p
+
+
+def load_settings() -> None:
+    if not SETTINGS_PATH.is_file():
+        return
+    try:
+        data = json.loads(SETTINGS_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    apply_settings(data, persist=False)
+
+
+def apply_settings(data: dict, persist: bool = True) -> None:
+    if not isinstance(data, dict):
+        return
+    if data.get("roots") is not None:
+        roots = data["roots"]
+        if isinstance(roots, str):
+            roots = [r.strip() for r in roots.split(",") if r.strip()]
+        SETTINGS["roots"] = [_expand(str(r)) for r in roots] or [str(HOME)]
+    if data.get("extraExclude") is not None:
+        extra = data["extraExclude"]
+        if isinstance(extra, str):
+            extra = [x.strip() for x in extra.split(",") if x.strip()]
+        SETTINGS["extraExclude"] = [str(x) for x in extra]
+    if data.get("watchCap") is not None:
+        SETTINGS["watchCap"] = max(16, int(data["watchCap"] or 2000))
+    if data.get("cacheMb") is not None:
+        SETTINGS["cacheMb"] = max(16, int(data["cacheMb"] or 500))
+    if data.get("maxFiles") is not None:
+        SETTINGS["maxFiles"] = max(1000, int(data["maxFiles"] or 500000))
+    if persist:
+        try:
+            STATE.mkdir(parents=True, exist_ok=True)
+            SETTINGS_PATH.write_text(json.dumps(SETTINGS))
+        except OSError:
+            pass
+
+
+def skip_parts() -> tuple[str, ...]:
+    return DEFAULT_SKIP + tuple(SETTINGS["extraExclude"])
+
+
+load_settings()
 
 
 def kind_of(path: Path, is_dir: bool = False) -> str:
@@ -102,9 +176,10 @@ def search(q: str) -> tuple[list[dict], str]:
 def find_names(q: str, limit: int) -> list[dict]:
     if shutil.which("find") is None:
         return []
-    roots = [str(HOME / d) for d in ("Documents", "Downloads", "Desktop") if (HOME / d).is_dir()]
+    roots = [r for r in SETTINGS["roots"] if r]
     if not roots:
         roots = [str(HOME)]
+    cap = min(int(limit), 40)
     out: list[dict] = []
     try:
         proc = subprocess.run(
@@ -115,7 +190,7 @@ def find_names(q: str, limit: int) -> list[dict]:
         )
     except (subprocess.TimeoutExpired, OSError):
         return out
-    skip = (".ssh", ".gnupg", "node_modules", "target", ".git")
+    skip = skip_parts()
     for line in proc.stdout.splitlines():
         if any(f"/{s}/" in line or line.endswith("/" + s) for s in skip):
             continue
@@ -134,9 +209,9 @@ def find_names(q: str, limit: int) -> list[dict]:
                 "size": st.st_size,
             }
         )
-        if len(out) >= limit:
+        if len(out) >= cap:
             break
-    return out
+    return out[: min(cap, SETTINGS["maxFiles"])]
 
 
 def preview(path_s: str, page: int = 1) -> dict:
@@ -196,11 +271,13 @@ def preview(path_s: str, page: int = 1) -> dict:
                 stderr=subprocess.DEVNULL,
             )
         except (subprocess.TimeoutExpired, OSError):
-            return {"kind": "pdf", "label": "couldn't render this page", "need_poppler": False}
+            return {"kind": "pdf", "label": "couldn't render this page", "need_poppler": False,
+                    "render_error": True}
         png = Path(str(dest_prefix) + ".png")
         if png.is_file():
             return {"kind": "pdf", "path": str(png), "page": page, "page_count": 1, "need_poppler": False}
-        return {"kind": "pdf", "label": "couldn't render this page", "need_poppler": False}
+        return {"kind": "pdf", "label": "couldn't render this page", "need_poppler": False,
+                "render_error": True}
     head = path.read_bytes()[:256]
     hex_lines = []
     for i in range(0, len(head), 16):
@@ -235,10 +312,10 @@ def status() -> dict:
         "backend": "compat",
         "files": 5,
         "watchCount": 0,
-        "watchCap": 2000,
-        "roots": [str(HOME)],
+        "watchCap": SETTINGS["watchCap"],
+        "roots": list(SETTINGS["roots"]),
         "cacheBytes": 0,
-        "cacheBudget": 500 * 1024 * 1024,
+        "cacheBudget": SETTINGS["cacheMb"] * 1024 * 1024,
         "poppler": shutil.which("pdftoppm") is not None,
         "plocate": shutil.which("plocate") is not None or shutil.which("locate") is not None,
         "ffmpeg": shutil.which("ffmpeg") is not None,
@@ -261,8 +338,12 @@ def handle(req: dict) -> dict:
     if cmd == "reveal":
         r = open_path(str(req.get("path") or ""), True)
         return {"id": rid, "kind": "ok" if r.get("ok") else "error", "error": r.get("error")}
-    if cmd in ("status", "capabilities", "warmup", "config", "theme", "select"):
-        body = {"id": rid, "kind": "status" if cmd in ("status", "capabilities", "config") else "ok"}
+    if cmd == "config":
+        apply_settings(req, persist=True)
+        body = {"id": rid, "kind": "status", "status": status(), "indexing": False, "progress": 1.0, "backend": "compat"}
+        return body
+    if cmd in ("status", "capabilities", "warmup", "theme", "select"):
+        body = {"id": rid, "kind": "status" if cmd in ("status", "capabilities") else "ok"}
         if body["kind"] == "status":
             body["status"] = status()
             body["indexing"] = False

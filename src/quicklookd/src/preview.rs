@@ -365,16 +365,22 @@ pub fn preview_pdf(path: &Path, page: u32, cache: &PreviewCache, poppler: bool) 
                 ..Preview::default()
             }
         }
-        Ok(_) | Err(_) => Preview {
-            kind: "pdf".into(),
-            need_poppler: Some(false),
-            page: Some(page),
-            page_count: Some(page_count),
-            label: Some("couldn't render this page".into()),
-            magic: Some("PDF document".into()),
-            path: Some(path.to_string_lossy().into()),
-            ..Preview::default()
-        },
+        Ok(_) | Err(_) => {
+            let head = fs::read(path).unwrap_or_default();
+            let hex = hex_dump(&head[..head.len().min(256)]);
+            Preview {
+                kind: "pdf".into(),
+                need_poppler: Some(false),
+                render_error: Some(true),
+                page: Some(page),
+                page_count: Some(page_count),
+                label: Some("couldn't render this page".into()),
+                magic: Some("PDF document".into()),
+                hex: Some(hex),
+                path: None,
+                ..Preview::default()
+            }
+        }
     }
 }
 
@@ -667,6 +673,20 @@ mod tests {
         let d = hex_dump(b"ABC");
         assert!(d.contains("41 42 43"));
         assert!(d.contains("ABC"));
+    }
+
+    #[test]
+    fn pdf_failure_is_render_error_not_raw_pdf() {
+        let dir = env::temp_dir().join(format!("ql-pdf-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("broken.pdf");
+        fs::write(&path, b"%PDF-1.4 not really a pdf").unwrap();
+        let cache = PreviewCache::new(dir.join("c"), 1024 * 1024);
+        let p = preview_pdf(&path, 1, &cache, true);
+        assert_eq!(p.kind, "pdf");
+        assert_eq!(p.render_error, Some(true));
+        assert!(p.path.is_none(), "must not hand the raw PDF to QML Image");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

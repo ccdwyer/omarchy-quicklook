@@ -120,6 +120,8 @@ pub struct Preview {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub need_poppler: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub render_error: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub entries: Option<Vec<DirEnt>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub total_size: Option<u64>,

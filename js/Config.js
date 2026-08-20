@@ -104,6 +104,19 @@ function markFirstRunShown() {
   current.firstRunShown = true
 }
 
+function serializeUi() {
+  return JSON.stringify({ firstRunShown: !!current.firstRunShown }) + "\n"
+}
+
+function loadUi(text) {
+  try {
+    var obj = JSON.parse(String(text || "{}"))
+    if (obj && (obj.firstRunShown === true || obj.firstRunShown === "true"))
+      current.firstRunShown = true
+  } catch (e) {}
+  return snapshot()
+}
+
 function privacySentence(roots, home) {
   var r = roots && roots.length ? roots : [home || "~"]
   var shown = r.slice(0, 3).join(", ")

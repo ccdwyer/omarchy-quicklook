@@ -1,7 +1,15 @@
 bin/quicklookd
+bin/quicklookd-*
 src/quicklookd/target/
+target/
 .DS_Store
 *.swp
 *.swo
 .impl_prompt.md
 .grok_impl.log
+.fix_prompt_r1.md
+.review_prompt.md
+.gpt_review_r1.md
+.gpt_review_err.log
+.code-review-graph/
+.serena/

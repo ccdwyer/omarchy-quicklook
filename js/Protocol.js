@@ -5,6 +5,10 @@ var lastAcceptedQueryId = 0
 var lastAcceptedPreviewId = 0
 var inFlightPreview = 0
 var inFlightPrefetch = 0
+var inFlightPreviewPath = ""
+var inFlightPrefetchPath = ""
+var pendingPreview = null
+var pendingPrefetch = null
 
 function reset() {
   lastId = 0
@@ -12,6 +16,10 @@ function reset() {
   lastAcceptedPreviewId = 0
   inFlightPreview = 0
   inFlightPrefetch = 0
+  inFlightPreviewPath = ""
+  inFlightPrefetchPath = ""
+  pendingPreview = null
+  pendingPrefetch = null
 }
 
 function nextId() {
@@ -57,13 +65,10 @@ function acceptPreview(msg) {
     return false
   if (msg.kind !== "preview")
     return false
+  clearSlot(msg.id)
   if (isStale(lastAcceptedPreviewId, msg.id))
     return false
   lastAcceptedPreviewId = Number(msg.id) || 0
-  if (inFlightPreview === msg.id)
-    inFlightPreview = 0
-  if (inFlightPrefetch === msg.id)
-    inFlightPrefetch = 0
   return true
 }
 
@@ -75,20 +80,92 @@ function canStartPrefetch() {
   return inFlightPrefetch === 0
 }
 
-function markPreview(id) {
+function markPreview(id, path) {
   inFlightPreview = Number(id) || 0
+  inFlightPreviewPath = String(path || "")
 }
 
-function markPrefetch(id) {
+function markPrefetch(id, path) {
   inFlightPrefetch = Number(id) || 0
+  inFlightPrefetchPath = String(path || "")
+}
+
+function clearSlot(id) {
+  var n = Number(id) || 0
+  if (inFlightPreview === n) {
+    inFlightPreview = 0
+    inFlightPreviewPath = ""
+  }
+  if (inFlightPrefetch === n) {
+    inFlightPrefetch = 0
+    inFlightPrefetchPath = ""
+  }
 }
 
 function dropInFlight(id) {
+  clearSlot(id)
+}
+
+function isInFlight(id) {
+  var n = Number(id) || 0
+  return n > 0 && (inFlightPreview === n || inFlightPrefetch === n)
+}
+
+function pathForInFlight(id) {
   var n = Number(id) || 0
   if (inFlightPreview === n)
-    inFlightPreview = 0
+    return inFlightPreviewPath
   if (inFlightPrefetch === n)
-    inFlightPrefetch = 0
+    return inFlightPrefetchPath
+  return ""
+}
+
+function queueOrStartPreview(req) {
+  if (!req)
+    return null
+  if (inFlightPreview === 0) {
+    markPreview(req.id, req.path)
+    return req
+  }
+  pendingPreview = req
+  return null
+}
+
+function queueOrStartPrefetch(req) {
+  if (!req)
+    return null
+  if (inFlightPrefetch === 0) {
+    markPrefetch(req.id, req.path)
+    return req
+  }
+  pendingPrefetch = req
+  return null
+}
+
+function takeReadyPreview() {
+  if (inFlightPreview !== 0 || !pendingPreview)
+    return null
+  var req = pendingPreview
+  pendingPreview = null
+  markPreview(req.id, req.path)
+  return req
+}
+
+function takeReadyPrefetch() {
+  if (inFlightPrefetch !== 0 || !pendingPrefetch)
+    return null
+  var req = pendingPrefetch
+  pendingPrefetch = null
+  markPrefetch(req.id, req.path)
+  return req
+}
+
+function pendingPreviewId() {
+  return pendingPreview ? pendingPreview.id : 0
+}
+
+function pendingPrefetchId() {
+  return pendingPrefetch ? pendingPrefetch.id : 0
 }
 
 function acceptedQueryId() {

@@ -1,0 +1,7 @@
+# No prebuilt musl binaries are committed from the macOS authoring host.
+# The GitHub Actions workflow `.github/workflows/release-helper.yml` builds
+#   quicklookd-x86_64-unknown-linux-musl
+#   quicklookd-aarch64-unknown-linux-musl
+# and publishes this file with sha256 sums on the GitHub release.
+# Until that workflow has run, `omarchy plugin add` still works: the overlay
+# uses compat/quicklookd.sh (Python when present) plus the shipped demo corpus.

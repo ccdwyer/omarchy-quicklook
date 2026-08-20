@@ -106,6 +106,38 @@ function fileUrl(path) {
   return "file://" + s
 }
 
+function isRasterPath(path) {
+  var ext = extOf(path)
+  return ext === "png" || ext === "jpg" || ext === "jpeg" || ext === "webp" || ext === "gif" || ext === "bmp" || ext === "svg"
+}
+
+function localPreview(path) {
+  var p = String(path || "")
+  var kind = kindOf(p, false)
+  if (kind === "image") {
+    return { kind: "image", path: p, animated: isAnimated(p) }
+  }
+  if (kind === "pdf") {
+    return {
+      kind: "pdf",
+      need_poppler: true,
+      render_error: false,
+      label: "install poppler for PDF previews",
+      magic: "PDF document"
+    }
+  }
+  if (kind === "csv") {
+    return { kind: "hex", hex: "", magic: "CSV table", label: "can't render this — hex view", path: p }
+  }
+  if (kind === "code") {
+    return { kind: "hex", hex: "", magic: "text", label: "can't render this — hex view", path: p }
+  }
+  if (kind === "dir") {
+    return { kind: "dir", entries: [], total_size: 0, path: p }
+  }
+  return { kind: "hex", hex: "", magic: "data", label: "can't render this — hex view", path: p }
+}
+
 function humanSize(n) {
   var v = Number(n) || 0
   if (v < 1024)

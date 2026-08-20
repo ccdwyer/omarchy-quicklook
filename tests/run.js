@@ -45,6 +45,7 @@ const Format = loadEngine("Format.js")
 const Theme = loadEngine("Theme.js")
 const Config = loadEngine("Config.js")
 const Fallback = loadEngine("Fallback.js")
+const Binds = loadEngine("Binds.js")
 
 let passed = 0
 let failed = 0
@@ -93,6 +94,38 @@ test("protocol: preview backpressure slots", () => {
   const msg = Protocol.parseLine('{"id":4,"kind":"preview","preview":{"kind":"image"}}')
   assert.strictEqual(Protocol.acceptPreview(msg), true)
   assert.strictEqual(Protocol.previewSlot(), 0)
+})
+
+test("protocol: latest preview replaces queued work", () => {
+  const a = Protocol.previewRequest("/a.pdf")
+  const first = Protocol.queueOrStartPreview(a)
+  assert.ok(first)
+  assert.strictEqual(Protocol.canStartPreview(), false)
+  const b = Protocol.previewRequest("/b.pdf")
+  const c = Protocol.previewRequest("/c.pdf")
+  assert.strictEqual(Protocol.queueOrStartPreview(b), null)
+  assert.strictEqual(Protocol.queueOrStartPreview(c), null)
+  assert.strictEqual(Protocol.pendingPreviewId(), c.id)
+  Protocol.acceptPreview({ id: a.id, kind: "preview", preview: { kind: "pdf" } })
+  const next = Protocol.takeReadyPreview()
+  assert.ok(next)
+  assert.strictEqual(next.path, "/c.pdf")
+  assert.strictEqual(Protocol.pendingPreviewId(), 0)
+})
+
+test("protocol: prefetch is a separate slot", () => {
+  const p = Protocol.previewRequest("/sel.rs")
+  assert.ok(Protocol.queueOrStartPreview(p))
+  const f = Protocol.prefetchRequest("/top.rs")
+  assert.ok(Protocol.queueOrStartPrefetch(f))
+  assert.strictEqual(Protocol.canStartPreview(), false)
+  assert.strictEqual(Protocol.canStartPrefetch(), false)
+  const f2 = Protocol.prefetchRequest("/other.rs")
+  assert.strictEqual(Protocol.queueOrStartPrefetch(f2), null)
+  Protocol.acceptPreview({ id: f.id, kind: "preview", preview: { kind: "code" } })
+  const next = Protocol.takeReadyPrefetch()
+  assert.ok(next)
+  assert.strictEqual(next.path, "/other.rs")
 })
 
 test("protocol: implicit query request shape", () => {
@@ -204,6 +237,42 @@ test("golden: query invoice fixture shape", () => {
   assert.strictEqual(fix.kind, "results")
   assert.strictEqual(fix.results[0].name, "invoice.pdf")
   assert.strictEqual(fix.results[0].kind, "pdf")
+})
+
+test("binds: SUPER+period only when key and modmask agree", () => {
+  const hit = JSON.stringify([
+    { key: "period", modmask: 64, dispatcher: "exec", arg: "something" }
+  ])
+  const missKey = JSON.stringify([{ key: "P", modmask: 64 }])
+  const missMod = JSON.stringify([{ key: "period", modmask: 0 }])
+  const shift = JSON.stringify([{ key: "period", modmask: 65 }])
+  const garbage = "not-json SUPER period"
+  assert.strictEqual(Binds.superPeriodBound(hit), true)
+  assert.strictEqual(Binds.superPeriodBound(missKey), false)
+  assert.strictEqual(Binds.superPeriodBound(missMod), false)
+  assert.strictEqual(Binds.superPeriodBound(shift), false)
+  assert.strictEqual(Binds.superPeriodBound(garbage), false)
+})
+
+test("config: firstRun persist roundtrip", () => {
+  assert.strictEqual(Config.snapshot().firstRunShown, false)
+  Config.markFirstRunShown()
+  const raw = Config.serializeUi()
+  Config.reset()
+  assert.strictEqual(Config.snapshot().firstRunShown, false)
+  Config.loadUi(raw)
+  assert.strictEqual(Config.snapshot().firstRunShown, true)
+})
+
+test("format: local preview never hands a raw pdf to Image", () => {
+  const img = Format.localPreview("/tmp/a.png")
+  assert.strictEqual(img.kind, "image")
+  const pdf = Format.localPreview("/tmp/invoice.pdf")
+  assert.strictEqual(pdf.kind, "pdf")
+  assert.strictEqual(pdf.need_poppler, true)
+  assert.ok(!pdf.path)
+  assert.strictEqual(Format.isRasterPath("/cache/page.png"), true)
+  assert.strictEqual(Format.isRasterPath("/docs/invoice.pdf"), false)
 })
 
 test("manifest: id, kinds, entryPoints", () => {
