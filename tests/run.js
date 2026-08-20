@@ -198,6 +198,9 @@ test("format: kinds from extensions", () => {
   assert.strictEqual(Format.kindOf("/tmp/blob.bin"), "hex")
   assert.strictEqual(Format.isAnimated("/tmp/x.gif"), true)
   assert.strictEqual(Format.fileUrl("/tmp/a"), "file:///tmp/a")
+  assert.strictEqual(Format.fileUrl("/tmp/a#b"), "file:///tmp/a%23b")
+  assert.strictEqual(Format.fileUrl("/tmp/a?b"), "file:///tmp/a%3Fb")
+  assert.strictEqual(Format.fileUrl("/tmp/a%b"), "file:///tmp/a%25b")
 })
 
 test("theme: palette from tokens uses font-safe hex", () => {

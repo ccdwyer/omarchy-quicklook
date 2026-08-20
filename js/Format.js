@@ -103,7 +103,11 @@ function fileUrl(path) {
     return ""
   if (s.indexOf("file:") === 0)
     return s
-  return "file://" + s
+  var parts = s.split("/")
+  var out = []
+  for (var i = 0; i < parts.length; i++)
+    out.push(encodeURIComponent(parts[i]))
+  return "file://" + out.join("/")
 }
 
 function isRasterPath(path) {

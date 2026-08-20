@@ -379,9 +379,10 @@ def _limit_child() -> None:
             pass
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
+def _kill_group(proc: subprocess.Popen, pgid: int | None = None) -> None:
+    gid = pgid if pgid is not None else proc.pid
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        os.killpg(gid, signal.SIGTERM)
     except OSError:
         try:
             proc.terminate()
@@ -389,11 +390,11 @@ def _kill_group(proc: subprocess.Popen) -> None:
             pass
     try:
         proc.wait(timeout=1)
-        return
     except (subprocess.TimeoutExpired, OSError):
         pass
+    # Always SIGKILL the recorded group, even if the leader already exited.
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
+        os.killpg(gid, signal.SIGKILL)
     except OSError:
         try:
             proc.kill()
@@ -435,10 +436,11 @@ def run_killable(
         stderr=stderr,
         **extra,
     )
+    pgid = proc.pid
     try:
         out, err = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired as exc:
-        _kill_group(proc)
+        _kill_group(proc, pgid)
         try:
             out, err = proc.communicate(timeout=2)
         except (subprocess.TimeoutExpired, OSError):
@@ -502,9 +504,8 @@ def svg_dims(path: Path) -> tuple[int, int] | None:
 
 
 def image_dims(path: Path) -> tuple[int, int] | None:
-    try:
-        head = path.read_bytes()[: 96 * 1024]
-    except OSError:
+    head = read_capped(path, 96 * 1024)
+    if not head:
         return None
     if len(head) >= 24 and head[:8] == b"\x89PNG\r\n\x1a\n":
         return _be_u32(head[16:20]), _be_u32(head[20:24])
@@ -752,7 +753,12 @@ def preview(path_s: str, page: int = 1) -> dict:
         entries = []
         total = 0
         try:
-            kids = sorted(path.iterdir(), key=lambda p: p.name)[:200]
+            kids = []
+            for i, kid in enumerate(path.iterdir()):
+                if i >= 200:
+                    break
+                kids.append(kid)
+            kids.sort(key=lambda p: p.name)
         except OSError:
             kids = []
         for kid in kids:

@@ -39,6 +39,10 @@ target/
 .review_prompt8.md
 .gpt_review_r8.md
 .gpt_review_err8.log
+.fix_prompt_r9.md
+.review_prompt9.md
+.gpt_review_r9.md
+.gpt_review_err9.log
 .code-review-graph/
 .serena/
 __pycache__/

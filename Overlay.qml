@@ -15,7 +15,6 @@ Item {
   property var shell: null
   property var manifest: null
   property var pluginRegistry: null
-  property var pluginSettings: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH") || ""
   property var roots: []
   property int watchCap: 2000

@@ -12,46 +12,66 @@ if [ "${QUICKLOOK_FORCE_SH:-}" != "1" ] && command -v python3 >/dev/null 2>&1; t
   exec python3 "$ROOT/compat/quicklookd.py" "$@"
 fi
 
-# One watchdog for every path-consuming command: TERM, then KILL.
-# Prefer GNU `timeout --kill-after`. Otherwise a portable killer.
-# Never run unbounded. Never use Perl SIGALRM as the sole guard.
+# One watchdog for every path-consuming command: new process group, TERM the
+# group, grace, then UNCONDITIONAL KILL of the group. GNU timeout already
+# uses a new process group + --kill-after. The portable path needs setsid
+# (or python os.setsid). If neither isolation method exists, skip.
 TIMEOUT_BIN=""
 TIMEOUT_STYLE=""
+HAVE_SETSID=0
+SETSID_PY=0
 
 init_watchdog() {
   if command -v timeout >/dev/null 2>&1; then
     if timeout --kill-after=1s 1s true >/dev/null 2>&1; then
       TIMEOUT_BIN=timeout
       TIMEOUT_STYLE=gnu-long
-      return
-    fi
-    if timeout -k 1 1 true >/dev/null 2>&1; then
+    elif timeout -k 1 1 true >/dev/null 2>&1; then
       TIMEOUT_BIN=timeout
       TIMEOUT_STYLE=gnu-short
-      return
     fi
   fi
-  if command -v gtimeout >/dev/null 2>&1; then
+  if [ -z "$TIMEOUT_STYLE" ] && command -v gtimeout >/dev/null 2>&1; then
     if gtimeout --kill-after=1s 1s true >/dev/null 2>&1; then
       TIMEOUT_BIN=gtimeout
       TIMEOUT_STYLE=gnu-long
     fi
+  fi
+  if command -v setsid >/dev/null 2>&1; then
+    HAVE_SETSID=1
+  elif command -v python3 >/dev/null 2>&1; then
+    SETSID_PY=1
   fi
 }
 
 init_watchdog
 
 watchdog_ok() {
-  # GNU timeout --kill-after, or the portable TERM-then-KILL killer.
-  return 0
+  # GNU timeout creates and kills a process group. Otherwise we need setsid.
+  if [ -n "$TIMEOUT_STYLE" ]; then
+    return 0
+  fi
+  [ "$HAVE_SETSID" = 1 ] || [ "$SETSID_PY" = 1 ]
 }
 
-# Portable TERM then KILL of a direct child. KILL cannot be trapped.
+spawn_group() {
+  if [ "$HAVE_SETSID" = 1 ]; then
+    setsid "$@" &
+    return
+  fi
+  python3 -c 'import os, sys
+os.setsid()
+os.execvp(sys.argv[1], sys.argv[1:])
+' "$@" &
+}
+
+# Portable: own process group, TERM the group, then KILL the group.
 portable_watchdog() {
   secs=$1
   shift
-  "$@" &
+  spawn_group "$@"
   pid=$!
+  pgid=$pid
   (
     n=0
     while [ "$n" -lt "$secs" ]; do
@@ -59,13 +79,15 @@ portable_watchdog() {
       n=$((n + 1))
       kill -0 "$pid" 2>/dev/null || exit 0
     done
-    kill -TERM "$pid" 2>/dev/null || true
+    kill -TERM -"$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
     sleep 1
-    kill -KILL "$pid" 2>/dev/null || true
+    kill -KILL -"$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
   ) &
   killer=$!
   st=0
   wait "$pid" || st=$?
+  # Unconditional group KILL even if the leader already exited.
+  kill -KILL -"$pgid" 2>/dev/null || true
   kill -KILL "$killer" 2>/dev/null || true
   wait "$killer" 2>/dev/null || true
   return $st
@@ -75,6 +97,7 @@ run_watchdog() {
   secs=$1
   shift
   [ "$#" -ge 1 ] || return 1
+  watchdog_ok || return 124
   case "$TIMEOUT_STYLE" in
     gnu-long)
       "$TIMEOUT_BIN" --kill-after=1s "${secs}s" "$@"
@@ -590,14 +613,9 @@ dir_preview_json() {
     full="$path/$name"
     k=$(kind_of "$full")
     sz=0
-    if [ -f "$full" ]; then
-      if sz=$(stat -c %s "$full" 2>/dev/null); then
-        :
-      elif sz=$(stat -f %z "$full" 2>/dev/null); then
-        :
-      else
-        sz=0
-      fi
+    if [ -f "$full" ] && watchdog_ok; then
+      sz=$(run_watchdog 1 stat -c %s "$full" 2>/dev/null) || \
+        sz=$(run_watchdog 1 stat -f %z "$full" 2>/dev/null) || sz=0
       [ -n "$sz" ] || sz=0
     fi
     ent="{\"name\":\"$(json_escape "$name")\",\"kind\":\"$k\",\"size\":$sz}"
@@ -766,6 +784,7 @@ do_open() {
   if [ "$reveal" = 1 ] && [ ! -d "$path" ]; then
     target=$(dirname "$path")
   fi
+  watchdog_ok || return 2
   if command -v gio >/dev/null 2>&1; then
     run_watchdog 8 gio open "$target" >/dev/null 2>&1 || true
     return 0

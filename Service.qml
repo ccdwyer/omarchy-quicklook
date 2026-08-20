@@ -13,7 +13,6 @@ Item {
   property var shell: null
   property var manifest: null
   property var pluginRegistry: null
-  property var pluginSettings: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH") || ""
 
   readonly property string pluginId: "io.github.chris.quicklook"
@@ -73,11 +72,6 @@ Item {
       cacheMb: root.cacheMb,
       maxFiles: root.maxFiles,
       extraExclude: root.extraExclude
-    }
-    if (root.pluginSettings && typeof root.pluginSettings === "object") {
-      var keys = Object.keys(root.pluginSettings)
-      for (var i = 0; i < keys.length; i++)
-        entry[keys[i]] = root.pluginSettings[keys[i]]
     }
     Config.applyInline(entry, root.home)
   }

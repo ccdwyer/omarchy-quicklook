@@ -7,7 +7,7 @@ Conservative choices where the Omarchy / Quickshell / Hyprland API was not 100% 
 - **Entry points are `Item`s**, not `ShellRoot`. Overlay exposes `open(payloadJson)` / `close()` / `toggle()` for `omarchy-shell shell summon|hide|toggle`. Taken from the Quattro shell README and the Desktop Undo overlay.
 - **`keepLoaded: true`** is set on the manifest even though the spec JSON block omitted it. The platform reference says plugins that must outlive a single summon (this overlay) should set it. Spec kinds/entryPoints are otherwise exact.
 - **Injected properties** on load: `omarchyPath`, `shell`, `manifest`, `pluginRegistry`. Overlay and Service still function if some of these are missing.
-- **Settings are inline on the `shell.json` plugins[] entry.** Service declares `roots`, `watchCap`, `cacheMb`, `maxFiles`, `extraExclude` plus an optional `pluginSettings` object. If the host copies entry fields onto the Item, they flow to the helper via a `config` command *before* indexing starts. There is no plugin-owned settings file. Runtime UI state (`firstRunShown`) is `~/.local/state/quicklook/ui.json`, not a settings file.
+- **Settings are inline on the `shell.json` plugins[] entry.** Service declares `roots`, `watchCap`, `cacheMb`, `maxFiles`, `extraExclude` only. The host copies those fields onto the Item; they flow to the helper via a `config` command *before* indexing starts. There is no nested `pluginSettings` object and no plugin-owned settings file. Runtime UI state (`firstRunShown`) is `~/.local/state/quicklook/ui.json`, not a settings file.
 - **Service owns the only helper.** Overlay never launches `quicklookd`. It talks to the warm service over documented `omarchy-shell shell call <id> <method> <arg>` (`query` / `preview` / `prefetch` / `snapshot` / …). There is no `pluginRegistry.serviceFor` or in-process `shell.summon`. Persistent and one-shot helper launches pass `--plugin-dir <pluginDir>` so the demo corpus is not resolved from the shell cwd.
 - **IPC verb** is `omarchy-shell shell call <id> <method> <arg>` and `shell summon <id> <payloadJson>`. Every `IpcHandler` method takes the required string argument (empty when unused). README examples always pass `<arg>`. We do not write `hyprland.conf`.
 - **`IpcHandler` target** is the plugin id. Overlay polls `snapshot` and sends commands through that channel.
@@ -62,7 +62,7 @@ Python `compat/` (`run_killable`: new session / `setsid`, wait, then SIGTERM to 
 | `ffmpeg` / `magick` / `convert` | 12s + group kill + rlimits |
 | `gio` / `xdg-open` / `open` | 8s + `start_new_session=True` + group SIGTERM then SIGKILL |
 
-POSIX `compat/quicklookd.sh` (`run_watchdog`: GNU `timeout --kill-after=1s` when available, otherwise portable TERM then KILL of the child):
+POSIX `compat/quicklookd.sh` (`run_watchdog`: GNU `timeout --kill-after=1s` when available — it already uses a new process group — otherwise `setsid`/`os.setsid` plus TERM then unconditional KILL of the **group**. `watchdog_ok` is false if neither isolation method exists; path-consuming features then degrade to metadata-only):
 
 | Binary | Bound |
 |---|---|
