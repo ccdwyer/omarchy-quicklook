@@ -1,0 +1,7 @@
+bin/quicklookd
+src/quicklookd/target/
+.DS_Store
+*.swp
+*.swo
+.impl_prompt.md
+.grok_impl.log

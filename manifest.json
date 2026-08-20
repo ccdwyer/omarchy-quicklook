@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.chris.quicklook",
+  "name": "QuickLook",
+  "version": "1.0.0",
+  "author": "chris",
+  "license": "MIT",
+  "description": "Fuzzy-find any file and preview it instantly: images, code, PDFs, CSVs — Space to pin, Enter to open.",
+  "kinds": ["overlay", "service"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Overlay.qml",
+    "service": "Service.qml"
+  }
+}

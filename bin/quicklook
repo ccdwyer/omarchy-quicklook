@@ -1,0 +1,19 @@
+#!/bin/sh
+# File-manager / terminal bridge: summon QuickLook on a path, or toggle the finder.
+set -eu
+id="io.github.chris.quicklook"
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  printf '%s\n' "usage: quicklook [path]" "  no args  toggle the finder overlay" "  path     summon a preview of that file"
+  exit 0
+fi
+if [ -n "${1:-}" ]; then
+  path=$1
+  case "$path" in
+    /*) ;;
+    *) path=$(pwd)/$path ;;
+  esac
+  # conservative JSON string escape
+  esc=$(printf '%s' "$path" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  exec omarchy-shell shell summon "$id" "{\"path\":\"$esc\"}"
+fi
+exec omarchy-shell shell toggle "$id" '{}'

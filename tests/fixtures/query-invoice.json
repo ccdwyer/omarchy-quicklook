@@ -1,0 +1,17 @@
+{
+  "id": 41,
+  "kind": "results",
+  "results": [
+    {
+      "path": "/plugin/samples/invoice.pdf",
+      "name": "invoice.pdf",
+      "kind": "pdf",
+      "score": 800,
+      "mtime": 0,
+      "size": 1090
+    }
+  ],
+  "indexing": false,
+  "progress": 1.0,
+  "backend": "demo"
+}
