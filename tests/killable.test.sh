@@ -109,6 +109,20 @@ run_shell_early_case() {
 run_shell_early_case "host-default" ""
 run_shell_early_case "forced-portable" "1"
 
+# --- GNU-timeout branch: early leader exit must also reap the descendant ---
+# The GNU path now wraps `timeout` in its own process group (setsid) and reaps
+# the whole group after the leader exits, identical to the portable path. It is
+# the branch a Linux judge machine actually takes. With FORCE_PORTABLE unset the
+# script prefers GNU timeout when present, so this deterministically exercises
+# gnu_group_watchdog wherever a GNU-style timeout exists; on hosts without one
+# (e.g. stock macOS) it is skipped and covered in Linux CI.
+if { command -v timeout >/dev/null 2>&1 && timeout --kill-after=1s 1s true >/dev/null 2>&1; } \
+   || { command -v gtimeout >/dev/null 2>&1 && gtimeout --kill-after=1s 1s true >/dev/null 2>&1; }; then
+  run_shell_early_case "gnu-timeout" ""
+else
+  echo "ok  shell GNU-timeout early-exit branch: skipped (no GNU timeout on host; exercised in Linux CI)"
+fi
+
 # --- Python process-group: same descendant case ---
 python3 - << PY
 import os, stat, sys, time, subprocess, importlib.util

@@ -7,6 +7,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 export QUICKLOOK_PLUGIN_DIR="${QUICKLOOK_PLUGIN_DIR:-$ROOT}"
+OS_NAME=$(uname -s 2>/dev/null || echo unknown)
 
 if [ "${QUICKLOOK_FORCE_SH:-}" != "1" ] && command -v python3 >/dev/null 2>&1; then
   exec python3 "$ROOT/compat/quicklookd.py" "$@"
@@ -58,10 +59,12 @@ init_watchdog() {
 init_watchdog
 
 watchdog_ok() {
-  # GNU timeout creates and kills a process group. Otherwise we need setsid.
-  if [ -n "$TIMEOUT_STYLE" ]; then
-    return 0
-  fi
+  # A new process group (setsid, or python os.setsid) is REQUIRED even when GNU
+  # timeout exists: --kill-after only bounds timeout's direct child, so a
+  # descendant that outlives a normal (or timed-out) leader exit would leak and
+  # keep the capture pipes open. Without group isolation we cannot forge a group
+  # to reap, so the path-consuming command is disabled (caller falls back to
+  # metadata-only) rather than run unprotected.
   [ "$HAVE_SETSID" = 1 ] || [ "$SETSID_PY" = 1 ]
 }
 
@@ -74,6 +77,18 @@ spawn_group() {
 os.setsid()
 os.execvp(sys.argv[1], sys.argv[1:])
 ' "$@" &
+}
+
+# Reap any survivors in process group $1 after the leader has exited (normal OR
+# timed out). TERM -> grace -> unconditional KILL, matching the Rust/Python
+# contract. Skipped entirely when the group is already empty, so a well-behaved
+# tool that exits cleanly with no lingering descendants adds zero latency.
+reap_group() {
+  _pgid=$1
+  kill -0 -"$_pgid" 2>/dev/null || return 0
+  kill -TERM -"$_pgid" 2>/dev/null || true
+  sleep 1
+  kill -KILL -"$_pgid" 2>/dev/null || true
 }
 
 # Portable: own process group, TERM the group, then KILL the group.
@@ -97,30 +112,30 @@ portable_watchdog() {
   killer=$!
   st=0
   wait "$pid" || st=$?
-  # Unconditional group KILL even if the leader already exited.
-  kill -KILL -"$pgid" 2>/dev/null || true
+  # Stop the in-flight timeout killer, then reap any descendants that outlived
+  # the leader: TERM -> grace -> unconditional KILL, skipped when the group is
+  # already empty (no latency for well-behaved tools).
   kill -KILL "$killer" 2>/dev/null || true
   wait "$killer" 2>/dev/null || true
+  reap_group "$pgid"
   return $st
 }
 
 # Run GNU `timeout ...` inside a new session so the whole subtree shares one
-# process group, then unconditionally KILL that group once timeout returns.
-# `timeout --kill-after` already bounds the *direct* child on the timeout path;
-# this adds the portable watchdog's guarantee that a descendant which outlives a
-# NORMAL (or timed-out) leader exit is reaped instead of leaking / holding pipes
-# open. Without setsid we cannot forge a separate group, so we fall back to plain
-# timeout (the direct child is still bounded).
+# process group, then reap that group once timeout returns. `timeout
+# --kill-after` already bounds the *direct* child on the timeout path; this adds
+# the portable watchdog's guarantee that a descendant which outlives a NORMAL
+# (or timed-out) leader exit is reaped instead of leaking / holding the capture
+# pipes open. Group isolation is guaranteed by watchdog_ok (setsid or python
+# os.setsid), so there is no unprotected foreground fallback: if a group cannot
+# be forged the caller has already disabled this path (metadata-only).
 gnu_group_watchdog() {
-  if [ "$HAVE_SETSID" = 1 ]; then
-    setsid "$@" &
-    gpid=$!
-    st=0
-    wait "$gpid" || st=$?
-    kill -KILL -"$gpid" 2>/dev/null || true
-    return $st
-  fi
-  "$@"
+  spawn_group "$@"
+  gpid=$!
+  st=0
+  wait "$gpid" || st=$?
+  reap_group "$gpid"
+  return $st
 }
 
 run_watchdog() {
@@ -684,10 +699,15 @@ isolation_ok() {
 run_isolated() {
   watchdog_ok || return 1
   (
+    # CPU seconds and file size are always safe to cap. Address space (-v) is
+    # Linux-only: on macOS RLIMIT_AS can prevent the renderer from exec'ing.
+    # NPROC (-u) is deliberately NOT set: it counts the user's ENTIRE existing
+    # process table, so a judge already running many processes could be unable
+    # to start any renderer. Fork bombs remain bounded by the CPU limit and the
+    # process-group wall-clock watchdog (run_watchdog).
     ulimit -t 8 2>/dev/null || true
-    ulimit -v 524288 2>/dev/null || true
     ulimit -f 65536 2>/dev/null || true
-    ulimit -u 32 2>/dev/null || true
+    [ "$OS_NAME" = Linux ] && ulimit -v 524288 2>/dev/null || true
     run_watchdog 8 "$@"
   ) >/dev/null 2>&1 || true
 }

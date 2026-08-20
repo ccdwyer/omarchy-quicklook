@@ -54,12 +54,17 @@ full pipe). Third: CPU / file-size rlimits. `RLIMIT_NPROC` is deliberately **not
 set: it counts the real user's entire existing process table, so any absolute cap
 makes fork / `pthread_create` fail on a normally-busy machine (it would break
 threaded tools like `pdftoppm`); fork bombs are bounded by `RLIMIT_CPU` + the
-group kill instead. `RLIMIT_AS` is applied on **Linux only** in all three impls
-(Rust gates it on `target_os = "linux"`, Python on `sys.platform == "linux"`;
-unreliable on macOS/Darwin, where a low address-space cap makes `dyld`/exec fail).
-If the process-group guarantee cannot be established (`setsid` fails, or no
-`setsid`/GNU-`timeout` in the POSIX fallback), the path-consuming feature is
-**disabled / metadata-only** rather than run unbounded.
+group kill instead. This holds in **all three** impls — the POSIX shell no longer
+sets `ulimit -u` either. `RLIMIT_AS` is applied on **Linux only** in all three
+(Rust gates it on `target_os = "linux"`, Python on `sys.platform == "linux"`, the
+POSIX shell on `uname -s = Linux`; unreliable on macOS/Darwin, where a low
+address-space cap makes `dyld`/exec fail).
+The process group is **mandatory**: `watchdog_ok` is true only when a new session
+can be forged (`setsid`, or python `os.setsid`). GNU `timeout` alone does **not**
+qualify — `--kill-after` bounds only its direct child, so a descendant outliving
+the leader would leak — so the GNU branch is itself run under `setsid` and reaped
+as a group. If no session-isolation method exists at all, the path-consuming
+feature is **disabled / metadata-only** rather than run unbounded.
 
 Rust helper (`run_limited` = process-group + wall-clock group kill + capped drain + rlimits):
 
@@ -83,14 +88,14 @@ Python `compat/` (`run_killable`: new session / `setsid`; on timeout, or on a cl
 | `ffmpeg` / `magick` / `convert` | 12s + group kill + rlimits |
 | `gio` / `xdg-open` / `open` | 8s + `start_new_session=True` + group SIGTERM then SIGKILL |
 
-POSIX `compat/quicklookd.sh` (`run_watchdog`: GNU `timeout --kill-after=1s` when available — wrapped in `setsid` and followed by an unconditional group `kill -KILL` so a descendant that outlives a normal or timed-out exit is reaped, matching the portable path — otherwise the portable `setsid`/`os.setsid` watchdog: TERM then unconditional KILL of the **group** after `wait`, on every exit. `watchdog_ok` is false if neither isolation method exists; path-consuming features then degrade to metadata-only):
+POSIX `compat/quicklookd.sh` (`run_watchdog`: both backends run the command under a new session via `spawn_group` — `setsid` or python `os.setsid` — and then `reap_group` after `wait`: if the process group still has members, TERM → 1s grace → **unconditional group `kill -KILL`**, on every exit path (normal *and* timed-out); skipped when the group is already empty so a clean tool adds no latency. GNU `timeout --kill-after=1s` is used for the direct-child bound when present but is itself wrapped in the session/group so a descendant that outlives it is still reaped — there is no unprotected foreground GNU path. `watchdog_ok` is false when neither `setsid` nor `os.setsid` is available, and path-consuming features then degrade to metadata-only):
 
 | Binary | Bound |
 |---|---|
 | `plocate` / `locate` / `find` | `run_watchdog` 2s |
 | `pdftoppm` / `ffmpeg` / `magick` / `convert` | `run_watchdog` 8s + ulimits |
 | `dd` / `od` / `head` / `ls` (user files) | `run_watchdog` 1s |
-| `gio` / `xdg-open` / `open` | `run_watchdog` 8s (foreground; never `&`) |
+| `gio` / `xdg-open` / `open` | `run_watchdog` 8s; portal/D-Bus launch returns fast leaving an empty group, so `reap_group` skips it and the opened app survives |
 | directory sizes | `stat` metadata, not `wc` of file contents |
 
 Perl `SIGALRM` is not used. A child that traps `TERM` is still reaped by `KILL`.
