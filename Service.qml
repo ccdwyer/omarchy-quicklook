@@ -86,6 +86,15 @@ Item {
     return root.helperIsBinary ? root.helperBin : root.helperSh
   }
 
+  function helperLaunch(oneshotJson) {
+    var cmd = [root.helperCommand(), "--plugin-dir", root.pluginDir]
+    if (oneshotJson !== undefined && oneshotJson !== null) {
+      cmd.push("--oneshot")
+      cmd.push(String(oneshotJson))
+    }
+    return cmd
+  }
+
   function writeLine(line) {
     try {
       if (typeof helper.write === "function") {
@@ -198,7 +207,7 @@ Item {
     if (!oneshotQueue.length)
       return
     root.oneshotCurrent = oneshotQueue.shift()
-    oneshotProc.command = [root.helperCommand(), "--oneshot", JSON.stringify(root.oneshotCurrent)]
+    oneshotProc.command = root.helperLaunch(JSON.stringify(root.oneshotCurrent))
     oneshotProc.running = true
   }
 
@@ -346,29 +355,53 @@ Item {
 
   function summonOverlay(payload) {
     var body = payload || "{}"
-    if (shell && typeof shell.summon === "function") {
-      shell.summon(root.pluginId, body)
-      return "ok"
-    }
     Quickshell.execDetached(["omarchy-shell", "shell", "summon", root.pluginId, body])
     return "ok"
   }
 
   function hideOverlay() {
-    if (shell && typeof shell.hide === "function") {
-      shell.hide(root.pluginId)
-      return "ok"
-    }
     Quickshell.execDetached(["omarchy-shell", "shell", "hide", root.pluginId])
     return "ok"
   }
 
   function toggleOverlay(payload) {
-    if (shell && typeof shell.toggle === "function") {
-      shell.toggle(root.pluginId, payload || "{}")
-      return "ok"
-    }
     Quickshell.execDetached(["omarchy-shell", "shell", "toggle", root.pluginId, payload || "{}"])
+    return "ok"
+  }
+
+  function snapshotJson() {
+    return JSON.stringify({
+      resultsRevision: root.resultsRevision,
+      previewRevision: root.previewRevision,
+      statusRevision: root.statusRevision,
+      results: root.lastResults,
+      preview: root.lastPreview,
+      indexing: root.indexing,
+      indexProgress: root.indexProgress,
+      backend: root.backend,
+      lastCaps: root.lastCaps,
+      lastStatus: root.lastStatus,
+      helperCmd: root.helperCmd
+    })
+  }
+
+  function previewArg(arg) {
+    var path = String(arg || "")
+    var page = 1
+    if (path.length && path.charAt(0) === "{") {
+      try {
+        var o = JSON.parse(path)
+        path = String(o.path || "")
+        page = Number(o.page) || 1
+      } catch (e) {}
+    }
+    return String(root.preview(path, page))
+  }
+
+  function themeArg(arg) {
+    try {
+      root.setTheme(JSON.parse(arg || "{}"))
+    } catch (e) {}
     return "ok"
   }
 
@@ -379,7 +412,7 @@ Item {
   function search(q) { return String(root.query(q)) }
 
   function startHelper() {
-    helper.command = [root.helperCommand()]
+    helper.command = root.helperLaunch()
     helper.running = true
     root.lastStatus = "starting"
     root.pingSent = false
@@ -507,10 +540,13 @@ Item {
 
     function ping(arg: string): string { return "ok" }
     function status(arg: string): string { return root.statusJson() }
+    function snapshot(arg: string): string { return root.snapshotJson() }
     function query(q: string): string { return String(root.query(q)) }
-    function preview(path: string): string { return String(root.preview(path, 1)) }
+    function preview(path: string): string { return root.previewArg(path) }
+    function prefetch(path: string): string { return String(root.prefetch(path)) }
     function open(path: string): string { return String(root.openPath(path)) }
     function reveal(path: string): string { return String(root.reveal(path)) }
+    function theme(json: string): string { return root.themeArg(json) }
     function warmup(arg: string): string { root.warmup(); return "ok" }
     function summon(arg: string): string { return root.summonOverlay(arg && arg.length ? arg : "{}") }
     function hide(arg: string): string { return root.hideOverlay() }

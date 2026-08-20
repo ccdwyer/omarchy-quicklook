@@ -1,0 +1,11 @@
+src/quicklookd/target/ export-ignore
+target/ export-ignore
+.fix_prompt*.md export-ignore
+.review_prompt*.md export-ignore
+.gpt_review* export-ignore
+.grok_impl.log export-ignore
+.impl_prompt.md export-ignore
+.serena/ export-ignore
+.code-review-graph/ export-ignore
+__pycache__/ export-ignore
+*.pyc export-ignore

@@ -68,7 +68,6 @@ pub fn render(
 }
 
 pub fn preview_image(path: &Path, cache: &PreviewCache) -> Preview {
-    let _ = cache;
     let ext = ext_of(path);
     let dims = if ext == "svg" {
         svg_dims(path)
@@ -83,6 +82,9 @@ pub fn preview_image(path: &Path, cache: &PreviewCache) -> Preview {
     }
     let pixels = w as u64 * h as u64;
     if pixels > MEGAPIXELS {
+        if let Some(p) = downsample_cached(path, cache, w, h) {
+            return p;
+        }
         return oversized_image(path, w, h);
     }
     if ext == "svg" || ext == "gif" {
@@ -106,6 +108,167 @@ pub fn preview_image(path: &Path, cache: &PreviewCache) -> Preview {
         },
         Err(_) => image_unsafe(path, "can't render this — hex view"),
     }
+}
+
+pub fn fit_megapixels(w: u32, h: u32, cap: u64) -> (u32, u32) {
+    let pixels = (w as u64).saturating_mul(h as u64).max(1);
+    if pixels <= cap {
+        return (w.max(1), h.max(1));
+    }
+    let scale = (cap as f64 / pixels as f64).sqrt();
+    let nw = ((w as f64) * scale).floor().max(1.0) as u32;
+    let nh = ((h as f64) * scale).floor().max(1.0) as u32;
+    (nw.max(1), nh.max(1))
+}
+
+fn downsample_cached(path: &Path, cache: &PreviewCache, w: u32, h: u32) -> Option<Preview> {
+    let (nw, nh) = fit_megapixels(w, h, MEGAPIXELS);
+    let mtime = fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis().to_string())
+        .unwrap_or_default();
+    let dest = cache.path_for(
+        &[
+            &path.to_string_lossy(),
+            &mtime,
+            "ds",
+            &nw.to_string(),
+            &nh.to_string(),
+        ],
+        "png",
+    );
+    if dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        return Some(downsampled_preview(&dest, nw, nh));
+    }
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if downsample_external(path, &dest, nw, nh) || downsample_self(path, &dest, nw, nh) {
+        if dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+            cache.gc();
+            return Some(downsampled_preview(&dest, nw, nh));
+        }
+    }
+    None
+}
+
+fn downsampled_preview(dest: &Path, nw: u32, nh: u32) -> Preview {
+    Preview {
+        kind: "image".into(),
+        path: Some(dest.to_string_lossy().into()),
+        width: Some(nw),
+        height: Some(nh),
+        label: Some("downsampled".into()),
+        animated: Some(false),
+        ..Preview::default()
+    }
+}
+
+fn downsample_external(src: &Path, dest: &Path, nw: u32, nh: u32) -> bool {
+    let src_s = src.to_string_lossy().into_owned();
+    let dest_s = dest.to_string_lossy().into_owned();
+    let scale = format!("{nw}:{nh}");
+    let geom = format!("{nw}x{nh}");
+    let candidates: Vec<Command> = {
+        let mut v = Vec::new();
+        if let Some(bin) = which("ffmpeg") {
+            let mut c = Command::new(bin);
+            c.args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                &src_s,
+                "-vf",
+                &format!("scale={scale}"),
+                "-frames:v",
+                "1",
+                "-y",
+                &dest_s,
+            ]);
+            v.push(c);
+        }
+        if let Some(bin) = which("magick") {
+            let mut c = Command::new(bin);
+            c.args([&src_s, "-resize", &geom, &dest_s]);
+            v.push(c);
+        }
+        if let Some(bin) = which("convert") {
+            let mut c = Command::new(bin);
+            c.args([&src_s, "-resize", &geom, &dest_s]);
+            v.push(c);
+        }
+        v
+    };
+    for cmd in candidates {
+        if dest.is_file() {
+            let _ = fs::remove_file(dest);
+        }
+        if run_limited(cmd, Duration::from_secs(12), 512 * 1024 * 1024, 12).is_ok()
+            && dest.is_file()
+            && dest.metadata().map(|m| m.len() > 0).unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn downsample_self(src: &Path, dest: &Path, nw: u32, nh: u32) -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+    let name = exe.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if name != "quicklookd" {
+        return false;
+    }
+    let mut cmd = Command::new(exe);
+    cmd.args([
+        "--downsample",
+        &src.to_string_lossy(),
+        &dest.to_string_lossy(),
+        &nw.to_string(),
+        &nh.to_string(),
+    ]);
+    run_limited(cmd, Duration::from_secs(12), 512 * 1024 * 1024, 12).is_ok()
+        && dest.is_file()
+        && dest.metadata().map(|m| m.len() > 0).unwrap_or(false)
+}
+
+pub fn downsample_cli(src: &Path, dest: &Path, nw: u32, nh: u32) -> i32 {
+    let nw = nw.max(1);
+    let nh = nh.max(1);
+    let img = match decode_for_downsample(src) {
+        Ok(i) => i,
+        Err(_) => return 1,
+    };
+    let resized = img.resize(nw, nh, image::imageops::FilterType::Triangle);
+    if let Some(parent) = dest.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if resized.save(dest).is_ok() {
+        0
+    } else {
+        1
+    }
+}
+
+fn decode_for_downsample(path: &Path) -> Result<image::DynamicImage, String> {
+    let reader = image::ImageReader::open(path).map_err(|e| e.to_string())?;
+    let mut reader = reader.with_guessed_format().map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(100_000);
+    limits.max_image_height = Some(100_000);
+    limits.max_alloc = Some(400 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode().map_err(|e| e.to_string())
 }
 
 fn header_dims(path: &Path) -> Option<(u32, u32)> {
@@ -766,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn huge_header_is_hex_without_decode() {
+    fn huge_header_does_not_hand_original_to_qml() {
         let dir = env::temp_dir().join(format!("ql-huge-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("huge.png");
@@ -781,10 +944,34 @@ mod tests {
         fs::write(&path, raw).unwrap();
         let cache = PreviewCache::new(dir.join("c"), 1024 * 1024);
         let p = preview_image(&path, &cache);
+        assert_ne!(p.kind, "image");
         assert_eq!(p.kind, "hex");
-        assert_eq!(p.label.as_deref(), Some("image exceeds 20 MP — hex view"));
         assert_eq!(p.width, Some(8000));
         assert_eq!(p.height, Some(8000));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fit_megapixels_caps_product() {
+        let (w, h) = fit_megapixels(8000, 8000, MEGAPIXELS);
+        assert!((w as u64).saturating_mul(h as u64) <= MEGAPIXELS);
+        assert!(w >= 1000 && h >= 1000);
+        assert_eq!(fit_megapixels(100, 100, MEGAPIXELS), (100, 100));
+    }
+
+    #[test]
+    fn downsample_cli_writes_png() {
+        let dir = env::temp_dir().join(format!("ql-ds-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let src = dir.join("in.png");
+        let dest = dir.join("out.png");
+        let img = image::RgbImage::from_pixel(32, 32, image::Rgb([10, 20, 30]));
+        img.save(&src).unwrap();
+        assert_eq!(downsample_cli(&src, &dest, 8, 8), 0);
+        assert!(dest.is_file());
+        let out = image::ImageReader::open(&dest).unwrap().decode().unwrap();
+        assert!(out.width() <= 8);
+        assert!(out.height() <= 8);
         let _ = fs::remove_dir_all(&dir);
     }
 

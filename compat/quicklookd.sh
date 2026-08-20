@@ -516,16 +516,63 @@ dir_preview_json() {
   printf '{"kind":"dir","entries":[%s],"path":"%s"}' "$entries" "$(json_escape "$path")"
 }
 
+isolation_ok() {
+  if command -v timeout >/dev/null 2>&1; then
+    return 0
+  fi
+  if ( ulimit -t 8 ) >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+run_isolated() {
+  # CPU / address-space / file-size / process-count limits + timeout watchdog.
+  (
+    ulimit -t 8 2>/dev/null || true
+    ulimit -v 524288 2>/dev/null || true
+    ulimit -f 65536 2>/dev/null || true
+    ulimit -u 32 2>/dev/null || true
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 8 "$@"
+    else
+      "$@"
+    fi
+  ) >/dev/null 2>&1 || true
+}
+
 run_pdftoppm() {
   path="$1"
   page="$2"
   dest="$3"
   prefix="${dest%.png}"
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 8 pdftoppm -f "$page" -l "$page" -png -r 140 -singlefile "$path" "$prefix" >/dev/null 2>&1 || true
-  else
-    pdftoppm -f "$page" -l "$page" -png -r 140 -singlefile "$path" "$prefix" >/dev/null 2>&1 || true
+  if ! isolation_ok; then
+    return 1
   fi
+  run_isolated pdftoppm -f "$page" -l "$page" -png -r 140 -singlefile "$path" "$prefix"
+}
+
+downsample_image() {
+  src="$1"
+  dest="$2"
+  nw="$3"
+  nh="$4"
+  if ! isolation_ok; then
+    return 1
+  fi
+  if command -v ffmpeg >/dev/null 2>&1; then
+    run_isolated ffmpeg -nostdin -hide_banner -loglevel error -i "$src" -vf "scale=${nw}:${nh}" -frames:v 1 -y "$dest"
+    [ -s "$dest" ] && return 0
+  fi
+  if command -v magick >/dev/null 2>&1; then
+    run_isolated magick "$src" -resize "${nw}x${nh}" "$dest"
+    [ -s "$dest" ] && return 0
+  fi
+  if command -v convert >/dev/null 2>&1; then
+    run_isolated convert "$src" -resize "${nw}x${nh}" "$dest"
+    [ -s "$dest" ] && return 0
+  fi
+  return 1
 }
 
 reply_preview() {
@@ -554,9 +601,28 @@ reply_preview() {
           [ "$ext" = gif ] && anim=true
           printf '{"id":%s,"kind":"preview","preview":{"kind":"image","path":"%s","animated":%s,"width":%s,"height":%s}}\n' \
             "$id" "$(json_escape "$path")" "$anim" "$w" "$h"
-        else
-          printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"image %sx%s","label":"image exceeds 20 MP — hex view","width":%s,"height":%s,"path":"%s"}}\n' \
-            "$id" "$(json_escape "$(hex_head "$path")")" "$w" "$h" "$w" "$h" "$(json_escape "$path")"
+        elif [ "$w" -gt 0 ] && [ "$h" -gt 0 ]; then
+          nw=$w
+          nh=$h
+          # integer sqrt-ish shrink so nw*nh <= 20e6
+          while [ $((nw * nh)) -gt 20000000 ]; do
+            nw=$((nw / 2))
+            nh=$((nh / 2))
+            [ "$nw" -gt 0 ] && [ "$nh" -gt 0 ] || break
+          done
+          [ "$nw" -gt 0 ] || nw=1
+          [ "$nh" -gt 0 ] || nh=1
+          cache_dir="${XDG_CACHE_HOME:-$HOME_DIR/.cache}/quicklook/previews"
+          mkdir -p "$cache_dir" 2>/dev/null || cache_dir="/tmp/quicklook-previews"
+          mkdir -p "$cache_dir"
+          dest="$cache_dir/ds-$$.png"
+          if downsample_image "$path" "$dest" "$nw" "$nh" && [ -s "$dest" ]; then
+            printf '{"id":%s,"kind":"preview","preview":{"kind":"image","path":"%s","animated":false,"width":%s,"height":%s,"label":"downsampled"}}\n' \
+              "$id" "$(json_escape "$dest")" "$nw" "$nh"
+          else
+            printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"image %sx%s","label":"image exceeds 20 MP — hex view","width":%s,"height":%s,"path":"%s"}}\n' \
+              "$id" "$(json_escape "$(hex_head "$path")")" "$w" "$h" "$w" "$h" "$(json_escape "$path")"
+          fi
         fi
       else
         printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"unverifiable image","label":"can'\''t render this — hex view","path":"%s"}}\n' \
@@ -564,7 +630,7 @@ reply_preview() {
       fi
       ;;
     pdf)
-      if command -v pdftoppm >/dev/null 2>&1; then
+      if command -v pdftoppm >/dev/null 2>&1 && isolation_ok; then
         cache_dir="${XDG_CACHE_HOME:-$HOME_DIR/.cache}/quicklook/pdf"
         mkdir -p "$cache_dir" 2>/dev/null || cache_dir="/tmp/quicklook-pdf"
         mkdir -p "$cache_dir"
@@ -580,6 +646,9 @@ reply_preview() {
           printf '{"id":%s,"kind":"preview","preview":{"kind":"pdf","need_poppler":false,"render_error":true,"page":%s,"page_count":1,"label":"couldn'\''t render this page","magic":"PDF document","hex":"%s"}}\n' \
             "$id" "$page" "$(json_escape "$(hex_head "$path")")"
         fi
+      elif command -v pdftoppm >/dev/null 2>&1; then
+        printf '{"id":%s,"kind":"preview","preview":{"kind":"pdf","need_poppler":false,"page":%s,"page_count":1,"label":"PDF metadata only — no isolated renderer","magic":"PDF document"}}\n' \
+          "$id" "$page"
       else
         printf '{"id":%s,"kind":"preview","preview":{"kind":"pdf","need_poppler":true,"page":%s,"page_count":1,"label":"install poppler for PDF previews","magic":"PDF document","path":"%s"}}\n' \
           "$id" "$page" "$(json_escape "$path")"
@@ -674,10 +743,26 @@ handle_line() {
 
 oneshot=0
 payload=""
-if [ "${1:-}" = "--oneshot" ]; then
-  oneshot=1
-  payload="${2:-}"
-fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --plugin-dir)
+      shift
+      if [ -n "${1:-}" ]; then
+        export QUICKLOOK_PLUGIN_DIR="$1"
+        SAMP="$1/samples"
+      fi
+      ;;
+    --oneshot)
+      oneshot=1
+      shift
+      payload="${1:-}"
+      ;;
+    *)
+      break
+      ;;
+  esac
+  [ "$#" -gt 0 ] && shift
+done
 
 load_config
 

@@ -16,7 +16,7 @@ Five-file demo corpus the overlay shows before you type (invoice, photo, 5k-row 
 omarchy plugin add <git-url> --enable
 ```
 
-That is the whole cold path. The installer does not run build hooks. On first summon the overlay talks to the colocated `compat/` helper (Python 3 when present, POSIX otherwise) — not to an invented in-process service lookup. Invoice PDF pages rasterize through resource-limited `pdftoppm` when Poppler is installed; images, CSV tables, and directory listings work without a Rust build. No `build.sh` is required to get a working finder.
+That is the whole cold path. The installer does not run build hooks. On first summon the overlay talks to the **service-owned** helper over `omarchy-shell shell call` (Python `compat/` when the Rust binary is missing). Invoice PDF pages rasterize through resource-limited `pdftoppm` when Poppler is installed; images over 20 MP are downsampled before QML sees them. No `build.sh` is required to get a working finder.
 
 The full Rust helper (`nucleo` ranking, sqlite frecency, isolated PDF children, 20 MP downsample) is optional. **This git tree does not and will not contain Linux prebuilts** — the authoring host is macOS, and fake binaries are worse than none.
 

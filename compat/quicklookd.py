@@ -13,7 +13,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-PLUGIN_DIR = Path(os.environ.get("QUICKLOOK_PLUGIN_DIR", Path(__file__).resolve().parent.parent))
+def _argv_value(flag: str) -> str | None:
+    argv = sys.argv
+    for i, a in enumerate(argv):
+        if a == flag and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+_pd = _argv_value("--plugin-dir") or os.environ.get("QUICKLOOK_PLUGIN_DIR")
+PLUGIN_DIR = Path(_pd) if _pd else Path(__file__).resolve().parent.parent
 SAMPLES = PLUGIN_DIR / "samples"
 HOME = Path(os.environ.get("HOME", "/tmp"))
 STATE = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "quicklook"
@@ -458,6 +467,68 @@ def image_dims(path: Path) -> tuple[int, int] | None:
     return None
 
 
+def fit_megapixels(w: int, h: int, cap: int = MEGAPIXELS) -> tuple[int, int]:
+    pixels = max(1, w * h)
+    if pixels <= cap:
+        return max(1, w), max(1, h)
+    scale = (cap / pixels) ** 0.5
+    return max(1, int(w * scale)), max(1, int(h * scale))
+
+
+def downsample_image(path: Path, w: int, h: int) -> dict | None:
+    nw, nh = fit_megapixels(w, h)
+    cache_dir = CACHE / "previews"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        cache_dir = Path("/tmp") / "quicklook-previews"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    dest = cache_dir / f"ds-{abs(hash((str(path), w, h, nw, nh)))}.png"
+    if dest.is_file() and dest.stat().st_size > 0:
+        return {
+            "kind": "image",
+            "path": str(dest),
+            "width": nw,
+            "height": nh,
+            "label": "downsampled",
+            "animated": False,
+        }
+    src = str(path)
+    dst = str(dest)
+    cmds: list[list[str]] = []
+    if shutil.which("ffmpeg"):
+        cmds.append(
+            [
+                "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+                "-i", src, "-vf", f"scale={nw}:{nh}", "-frames:v", "1", "-y", dst,
+            ]
+        )
+    if shutil.which("magick"):
+        cmds.append(["magick", src, "-resize", f"{nw}x{nh}", dst])
+    if shutil.which("convert"):
+        cmds.append(["convert", src, "-resize", f"{nw}x{nh}", dst])
+    for cmd in cmds:
+        try:
+            subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=12,
+                preexec_fn=_limit_child,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+        if dest.is_file() and dest.stat().st_size > 0:
+            return {
+                "kind": "image",
+                "path": str(dest),
+                "width": nw,
+                "height": nh,
+                "label": "downsampled",
+                "animated": False,
+            }
+    return None
+
+
 def preview_image(path: Path) -> dict:
     ext = path.suffix.lower().lstrip(".")
     dims = svg_dims(path) if ext == "svg" else image_dims(path)
@@ -465,6 +536,9 @@ def preview_image(path: Path) -> dict:
         return hex_preview(path, "unverifiable image", "can't render this — hex view")
     w, h = dims
     if w * h > MEGAPIXELS:
+        ds = downsample_image(path, w, h)
+        if ds:
+            return ds
         return hex_preview(
             path,
             f"image {w}x{h}",

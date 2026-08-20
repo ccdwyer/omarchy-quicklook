@@ -323,16 +323,24 @@ test("compat python rasterizes PDFs with resource limits", () => {
   assert.ok(src.indexOf("compat mode does not rasterize") < 0)
 })
 
-test("overlay colocates helper and does not invent serviceFor", () => {
+test("overlay uses documented IPC and does not launch a helper", () => {
   const qml = fs.readFileSync(path.join(ROOT, "Overlay.qml"), "utf8")
-  assert.ok(qml.indexOf("HelperClient") >= 0)
+  assert.ok(qml.indexOf("HelperClient") < 0)
   assert.ok(qml.indexOf("serviceFor") < 0)
   assert.ok(qml.indexOf("firstPartyServiceFor") < 0)
+  assert.ok(qml.indexOf("omarchy-shell") >= 0)
+  assert.ok(qml.indexOf("snapshot") >= 0)
+  assert.ok(qml.indexOf("CtrlModifier") < 0 || !/Key_J.*ControlModifier/.test(qml))
+  assert.ok(/root\.pinned && event\.key === Qt\.Key_J/.test(qml))
   const svc = fs.readFileSync(path.join(ROOT, "Service.qml"), "utf8")
+  assert.ok(svc.indexOf("--plugin-dir") >= 0)
   assert.ok(/function status\(arg: string\)/.test(svc))
+  assert.ok(/function snapshot\(arg: string\)/.test(svc))
   assert.ok(/function summon\(arg: string\)/.test(svc))
-  assert.ok(/function hide\(arg: string\)/.test(svc))
-  assert.ok(/function toggle\(arg: string\)/.test(svc))
+  assert.ok(svc.indexOf("shell.summon") < 0)
+  assert.ok(svc.indexOf("helperLaunch") >= 0)
+  const helperGone = !fs.existsSync(path.join(ROOT, "HelperClient.qml"))
+  assert.ok(helperGone)
 })
 
 test("manifest: id, kinds, entryPoints", () => {

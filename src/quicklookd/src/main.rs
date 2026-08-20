@@ -3,6 +3,17 @@ use std::io::{self, BufRead, Write};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(i) = args.iter().position(|a| a == "--downsample") {
+        let src = args.get(i + 1).map(std::path::PathBuf::from);
+        let dest = args.get(i + 2).map(std::path::PathBuf::from);
+        let nw: u32 = args.get(i + 3).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let nh: u32 = args.get(i + 4).and_then(|s| s.parse().ok()).unwrap_or(1);
+        let rc = match (src, dest) {
+            (Some(s), Some(d)) => quicklookd::preview::downsample_cli(&s, &d, nw, nh),
+            _ => 1,
+        };
+        std::process::exit(rc);
+    }
     let oneshot = args.iter().any(|a| a == "--oneshot");
     let cfg = AppConfig::from_env_and_args(&args);
     let engine = Engine::new(cfg);

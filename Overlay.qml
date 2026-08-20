@@ -39,6 +39,13 @@ Item {
   property int lastPreviewRev: 0
   property int pdfPage: 1
   property string directPath: ""
+  property var lastCaps: ({})
+  property bool indexing: false
+  property real indexProgress: 0
+  property string backend: ""
+  property string helperLabel: ""
+  property var ipcQueue: []
+  property var ipcCurrent: null
 
   property color background: Color.menu.background
   property color foreground: Color.menu.text
@@ -145,34 +152,112 @@ Item {
       root.open("{}")
   }
 
-  HelperClient {
-    id: helper
-    pluginDir: root.pluginDir
-    home: Quickshell.env("HOME") || "/tmp"
-    pluginSettings: root.pluginSettings
-    roots: root.roots
-    watchCap: root.watchCap
-    cacheMb: root.cacheMb
-    maxFiles: root.maxFiles
-    extraExclude: root.extraExclude
+  function callIpc(method, arg) {
+    var job = { method: String(method || ""), arg: arg === undefined || arg === null ? "" : String(arg) }
+    if (job.method === "snapshot") {
+      var kept = []
+      for (var i = 0; i < root.ipcQueue.length; i++) {
+        if (root.ipcQueue[i].method !== "snapshot")
+          kept.push(root.ipcQueue[i])
+      }
+      root.ipcQueue = kept
+    }
+    root.ipcQueue.push(job)
+    root.runIpc()
+  }
+
+  function runIpc() {
+    if (ipcProc.running || root.ipcCurrent)
+      return
+    if (!root.ipcQueue.length)
+      return
+    var next = null
+    var rest = []
+    var snap = null
+    for (var i = 0; i < root.ipcQueue.length; i++) {
+      var job = root.ipcQueue[i]
+      if (job.method === "snapshot")
+        snap = job
+      else if (!next)
+        next = job
+      else
+        rest.push(job)
+    }
+    if (!next)
+      next = snap
+    else if (snap)
+      rest.push(snap)
+    root.ipcQueue = rest
+    root.ipcCurrent = next
+    ipcProc.command = ["omarchy-shell", "shell", "call", root.pluginId, next.method, next.arg]
+    ipcProc.running = true
+  }
+
+  function applySnapshot(raw) {
+    var snap = null
+    try {
+      snap = JSON.parse(String(raw || ""))
+    } catch (e) {
+      return
+    }
+    if (!snap || typeof snap !== "object")
+      return
+    if (snap.backend)
+      root.backend = String(snap.backend)
+    if (snap.indexing !== undefined)
+      root.indexing = !!snap.indexing
+    if (snap.indexProgress !== undefined)
+      root.indexProgress = Number(snap.indexProgress) || 0
+    if (snap.lastCaps)
+      root.lastCaps = snap.lastCaps
+    if (snap.helperCmd)
+      root.helperLabel = String(snap.helperCmd)
+    if (snap.resultsRevision !== root.lastQueryRev) {
+      root.lastQueryRev = Number(snap.resultsRevision) || 0
+      var list = snap.results || []
+      root.results = list
+      if (!list.length) {
+        if (root.queryText.length)
+          root.setEmpty("no matches", "The index will keep warming; try a shorter query.")
+        else
+          root.setEmpty("no matches", "")
+      } else {
+        root.emptyReason = ""
+        if (root.selectedIndex >= list.length)
+          root.selectedIndex = 0
+        var hit = list[root.selectedIndex] || list[0]
+        if (hit)
+          root.requestPreview(hit.path, 1)
+        var top = list[0]
+        if (top && hit && top.path !== hit.path)
+          root.requestPrefetch(top.path)
+      }
+    }
+    if (snap.previewRevision !== root.lastPreviewRev) {
+      root.lastPreviewRev = Number(snap.previewRevision) || 0
+      root.preview = snap.preview || {}
+      root.previewLoading = false
+      if (root.preview && root.preview.page)
+        root.pdfPage = Number(root.preview.page) || 1
+    }
   }
 
   function pushTheme() {
-    helper.setTheme(root.palette)
+    root.callIpc("theme", JSON.stringify(root.palette))
   }
 
   function requestQuery(q) {
-    helper.query(q)
+    root.callIpc("query", q)
   }
 
   function requestPreview(path, page) {
     root.previewLoading = true
     root.pdfPage = page || 1
-    helper.preview(path, root.pdfPage)
+    root.callIpc("preview", JSON.stringify({ path: path, page: root.pdfPage }))
   }
 
   function requestPrefetch(path) {
-    helper.prefetch(path)
+    root.callIpc("prefetch", path)
   }
 
   function currentHit() {
@@ -200,7 +285,7 @@ Item {
     var hit = root.currentHit()
     if (!hit)
       return
-    helper.openPath(hit.path)
+    root.callIpc("open", hit.path)
     root.close()
   }
 
@@ -208,14 +293,16 @@ Item {
     var hit = root.currentHit()
     if (!hit)
       return
-    helper.reveal(hit.path)
+    root.callIpc("reveal", hit.path)
   }
 
   function pinToggle() {
     if (!root.currentHit())
       return
     root.pinned = !root.pinned
-    if (!root.pinned)
+    if (root.pinned)
+      Qt.callLater(function() { pinnedPane.forceActiveFocus() })
+    else
       Qt.callLater(function() { searchField.forceActiveFocus() })
   }
 
@@ -237,7 +324,7 @@ Item {
   function dismissFirstRun() {
     Config.markFirstRunShown()
     root.firstRun = false
-    helper.markFirstRun()
+    root.callIpc("markFirstRun", "")
   }
 
   function setEmpty(reason, detail) {
@@ -248,34 +335,7 @@ Item {
   }
 
   function pullService() {
-    if (helper.resultsRevision !== root.lastQueryRev) {
-      root.lastQueryRev = helper.resultsRevision
-      var list = helper.lastResults || []
-      root.results = list
-      if (!list.length) {
-        if (root.queryText.length)
-          root.setEmpty("no matches", "The index will keep warming; try a shorter query.")
-        else
-          root.setEmpty("no matches", "")
-      } else {
-        root.emptyReason = ""
-        if (root.selectedIndex >= list.length)
-          root.selectedIndex = 0
-        var hit = list[root.selectedIndex] || list[0]
-        if (hit)
-          root.requestPreview(hit.path, 1)
-        var top = list[0]
-        if (top && hit && top.path !== hit.path)
-          root.requestPrefetch(top.path)
-      }
-    }
-    if (helper.previewRevision !== root.lastPreviewRev) {
-      root.lastPreviewRev = helper.previewRevision
-      root.preview = helper.lastPreview || {}
-      root.previewLoading = false
-      if (root.preview && root.preview.page)
-        root.pdfPage = Number(root.preview.page) || 1
-    }
+    root.callIpc("snapshot", "")
   }
 
   function escapeOut() {
@@ -295,13 +355,30 @@ Item {
   }
 
   function indexingCaption() {
-    if (helper.indexing) {
-      var pct = Math.round((Number(helper.indexProgress) || 0) * 100)
+    if (root.indexing) {
+      var pct = Math.round((Number(root.indexProgress) || 0) * 100)
       return "indexing… " + pct + "%"
     }
-    if (helper.backend)
-      return String(helper.backend)
+    if (root.backend)
+      return String(root.backend)
     return ""
+  }
+
+  Process {
+    id: ipcProc
+    running: false
+    stdout: StdioCollector {
+      id: ipcOut
+      waitForEnd: true
+    }
+    onExited: {
+      var job = root.ipcCurrent
+      var text = String(ipcOut.text || "").trim()
+      root.ipcCurrent = null
+      if (job && job.method === "snapshot" && text.length)
+        root.applySnapshot(text)
+      root.runIpc()
+    }
   }
 
   Process {
@@ -460,10 +537,10 @@ Item {
               } else if (event.key === Qt.Key_Question) {
                 root.showInfo = !root.showInfo
                 event.accepted = true
-              } else if (event.key === Qt.Key_J && (event.modifiers & Qt.ControlModifier)) {
+              } else if (root.pinned && event.key === Qt.Key_J) {
                 root.turnPage(1)
                 event.accepted = true
-              } else if (event.key === Qt.Key_K && (event.modifiers & Qt.ControlModifier)) {
+              } else if (root.pinned && event.key === Qt.Key_K) {
                 root.turnPage(-1)
                 event.accepted = true
               }
@@ -582,9 +659,11 @@ Item {
 
     // pinned fullscreen preview
     Item {
+      id: pinnedPane
       anchors.fill: parent
       visible: root.pinned
       focus: root.pinned
+      activeFocusOnTab: true
 
       MouseArea {
         anchors.fill: parent
@@ -688,11 +767,11 @@ Item {
         Text {
           width: parent.width
           text: {
-            var caps = helper.lastCaps || {}
+            var caps = root.lastCaps || {}
             var roots = (caps.roots && caps.roots.length) ? caps.roots.join(", ") : (Quickshell.env("HOME") || "~")
             var watches = (caps.watchCount || 0) + " / " + (caps.watchCap || 2000)
             var cache = Format.humanSize(caps.cacheBytes || 0) + " / " + Format.humanSize(caps.cacheBudget || 524288000)
-            return "roots  " + roots + "\nwatches  " + watches + "   (raise fs.inotify.max_user_watches if a future inotify build needs it)\ncache  " + cache + "\npoppler  " + (caps.poppler ? "yes" : "no") + "   plocate  " + (caps.plocate ? "yes" : "no") + "   helper  " + (caps.helper || helper.helperCmd || "—")
+            return "roots  " + roots + "\nwatches  " + watches + "   (raise fs.inotify.max_user_watches if a future inotify build needs it)\ncache  " + cache + "\npoppler  " + (caps.poppler ? "yes" : "no") + "   plocate  " + (caps.plocate ? "yes" : "no") + "   helper  " + (caps.helper || root.helperLabel || "—")
           }
           color: root.foreground
           wrapMode: Text.WordWrap

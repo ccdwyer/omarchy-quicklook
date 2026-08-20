@@ -7,16 +7,24 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 static PARSE_THREADS: AtomicU32 = AtomicU32::new(0);
+static LIVE_THREADS: AtomicU32 = AtomicU32::new(0);
 const MAX_PARSE_THREADS: u32 = 2;
+const MAX_LIVE_THREADS: u32 = 16;
 
 pub fn with_timeout<T, F>(ms: u64, f: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    let live = LIVE_THREADS.fetch_add(1, Ordering::SeqCst);
+    if live >= MAX_LIVE_THREADS {
+        LIVE_THREADS.fetch_sub(1, Ordering::SeqCst);
+        return Err("parser busy".into());
+    }
     loop {
         let n = PARSE_THREADS.load(Ordering::SeqCst);
         if n >= MAX_PARSE_THREADS {
+            LIVE_THREADS.fetch_sub(1, Ordering::SeqCst);
             return Err("parser busy".into());
         }
         if PARSE_THREADS
@@ -26,16 +34,26 @@ where
             break;
         }
     }
+    let released = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let released_t = released.clone();
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        PARSE_THREADS.fetch_sub(1, Ordering::SeqCst);
+        if !released_t.swap(true, Ordering::SeqCst) {
+            PARSE_THREADS.fetch_sub(1, Ordering::SeqCst);
+        }
+        LIVE_THREADS.fetch_sub(1, Ordering::SeqCst);
         let _ = tx.send(result);
     });
     match rx.recv_timeout(Duration::from_millis(ms)) {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(_)) => Err("parser panicked".into()),
-        Err(_) => Err("timeout".into()),
+        Err(_) => {
+            if !released.swap(true, Ordering::SeqCst) {
+                PARSE_THREADS.fetch_sub(1, Ordering::SeqCst);
+            }
+            Err("timeout".into())
+        }
     }
 }
 
@@ -149,6 +167,16 @@ mod tests {
             }
         }
         panic!("parser stayed busy");
+    }
+
+    #[test]
+    fn timeout_releases_slot_for_later_work() {
+        let _ = with_timeout(40, || {
+            thread::sleep(Duration::from_millis(300));
+            1u8
+        });
+        let r = with_timeout(400, || 9u8);
+        assert_eq!(r.unwrap(), 9);
     }
 
     #[test]
