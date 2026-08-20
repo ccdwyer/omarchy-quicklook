@@ -13,7 +13,7 @@ Five-file demo corpus the overlay shows before you type (invoice, photo, 5k-row 
 ## Install
 
 ```sh
-omarchy plugin add <git-url> --enable
+omarchy plugin add https://github.com/ccdwyer/omarchy-quicklook.git --enable
 ```
 
 That is the whole cold path. The installer does not run build hooks. On first summon the overlay talks to the **service-owned** helper over `omarchy-shell io.github.chris.quicklook` (Python `compat/` when the Rust binary is missing). Invoice PDF pages rasterize through resource-limited `pdftoppm` when Poppler is installed; images over 20 MP are downsampled before QML sees them. No `build.sh` is required to get a working finder.
