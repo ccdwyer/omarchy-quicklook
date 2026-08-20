@@ -282,19 +282,68 @@ test("golden: query invoice fixture shape", () => {
   assert.strictEqual(fix.results[0].kind, "pdf")
 })
 
-test("binds: SUPER+period only when key and modmask agree", () => {
-  const hit = JSON.stringify([
-    { key: "period", modmask: 64, dispatcher: "exec", arg: "something" }
-  ])
-  const missKey = JSON.stringify([{ key: "P", modmask: 64 }])
-  const missMod = JSON.stringify([{ key: "period", modmask: 0 }])
-  const shift = JSON.stringify([{ key: "period", modmask: 65 }])
-  const garbage = "not-json SUPER period"
-  assert.strictEqual(Binds.superPeriodBound(hit), true)
-  assert.strictEqual(Binds.superPeriodBound(missKey), false)
-  assert.strictEqual(Binds.superPeriodBound(missMod), false)
-  assert.strictEqual(Binds.superPeriodBound(shift), false)
-  assert.strictEqual(Binds.superPeriodBound(garbage), false)
+test("binds: empty live list offers SUPER+PERIOD", () => {
+  const p = Binds.plan([])
+  assert.strictEqual(p.needed, true)
+  assert.strictEqual(p.toAdd.length, 1)
+  assert.strictEqual(p.toAdd[0].chosen, "SUPER + PERIOD")
+  assert.ok(Binds.luaBlock(p.toAdd).indexOf("o.bind(\"SUPER + PERIOD\"") === 0)
+  assert.ok(p.toAdd[0].chosen !== "SUPER + SHIFT + P")
+})
+
+test("binds: SUPER+CTRL+PERIOD transcode is not a collision", () => {
+  const live = [
+    { modmask: 68, key: "PERIOD", dispatcher: "__lua", arg: "194", description: "Transcode" }
+  ]
+  const p = Binds.plan(live)
+  assert.strictEqual(p.needed, true)
+  assert.strictEqual(p.toAdd[0].chosen, "SUPER + PERIOD")
+})
+
+test("binds: lowercase period key matches SUPER+PERIOD", () => {
+  const live = [
+    { modmask: 64, key: "period", dispatcher: "exec", arg: "other", description: "taken" }
+  ]
+  const p = Binds.plan(live)
+  assert.strictEqual(p.needed, true)
+  assert.strictEqual(p.toAdd[0].chosen, "SUPER + ALT + PERIOD")
+})
+
+test("binds: period as '.' also matches", () => {
+  const live = [
+    { modmask: 64, key: ".", dispatcher: "exec", arg: "other", description: "taken" }
+  ]
+  const p = Binds.plan(live)
+  assert.strictEqual(p.toAdd[0].chosen, "SUPER + ALT + PERIOD")
+})
+
+test("binds: SUPER+SHIFT+P stock photos is not used as an alternate", () => {
+  const live = [
+    { modmask: 64, key: "PERIOD", dispatcher: "exec", arg: "other", description: "taken" },
+    { modmask: 65, key: "P", dispatcher: "__lua", arg: "322", description: "Google Photos" }
+  ]
+  const p = Binds.plan(live)
+  assert.strictEqual(p.toAdd[0].chosen, "SUPER + ALT + PERIOD")
+  assert.ok(p.toAdd.every((x) => x.chosen !== "SUPER + SHIFT + P"))
+})
+
+test("binds: already-ours via lua description hides the offer", () => {
+  const live = [
+    { modmask: 64, key: "PERIOD", dispatcher: "__lua", arg: "15", description: "QuickLook" }
+  ]
+  const p = Binds.plan(live)
+  assert.strictEqual(p.needed, false)
+  assert.strictEqual(p.already, 1)
+  assert.strictEqual(p.toAdd.length, 0)
+})
+
+test("binds: already-ours via plugin id in arg hides the offer", () => {
+  const live = [
+    { modmask: 72, key: "PERIOD", dispatcher: "exec", arg: "omarchy-shell shell toggle io.github.chris.quicklook '{}'", description: "" }
+  ]
+  const p = Binds.plan(live)
+  assert.strictEqual(p.needed, false)
+  assert.strictEqual(p.toAdd.length, 0)
 })
 
 test("config: firstRun persist roundtrip", () => {

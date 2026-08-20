@@ -56,7 +56,7 @@ sudo updatedb
 | Combo | Action |
 |---|---|
 | Super+. | Toggle finder + preview (default) |
-| Super+Shift+P | Alternate toggle if Super+. collides |
+| Super+Alt+. | Alternate toggle if Super+. collides |
 | ↑ ↓ | Move selection (preview follows) |
 | Space | Pin / unpin fullscreen preview |
 | j / k | Next / previous PDF page when pinned |
@@ -65,11 +65,13 @@ sudo updatedb
 | Esc | Unpin, then close |
 | ? | Indexed roots, watch cap, cache use |
 
-The plugin does **not** write Hyprland config. Bind it yourself. `bindings.lua` parses `hyprctl binds -j` objects and treats SUPER+period as a collision only when `key` is `period`/`.` **and** modmask bit 64 (SUPER) is set without SHIFT/CTRL/ALT.
+If Super+. is free, the overlay first-run card offers **Add keybindings**. That writes an `o.bind` line to `~/.config/hypr/bindings.lua` (Hyprland reloads on save). Combos you already use are skipped; Super+. falls back to Super+Alt+.. Super+Shift+P is Omarchy's Google Photos bind and is never stolen. The plugin never unbinds someone else's shortcut.
+
+Lua binds show dispatcher `__lua` plus a description — "ours" is plugin id in `arg` or description `QuickLook`.
 
 ```
 bind = SUPER, period, exec, omarchy-shell shell toggle io.github.chris.quicklook '{}'
-bind = SUPER SHIFT, P, exec, omarchy-shell shell toggle io.github.chris.quicklook '{}'
+bind = SUPER ALT, period, exec, omarchy-shell shell toggle io.github.chris.quicklook '{}'
 ```
 
 Summon a specific file from a terminal or file-manager custom action (the Wayland-honest stand-in for “Space in Finder”):
@@ -137,6 +139,7 @@ omarchy-shell io.github.chris.quicklook snapshot ''
 omarchy-shell io.github.chris.quicklook theme '{"bg":"#1e1e2e","fg":"#cdd6f4","accent":"#89b4fa"}'
 omarchy-shell io.github.chris.quicklook prefetch /tmp/file.pdf
 omarchy-shell io.github.chris.quicklook warmup ''
+omarchy-shell io.github.chris.quicklook installBinds ''
 ```
 
 `preview` takes either a bare path or a `{"path":…,"page":N}` object. Overlay

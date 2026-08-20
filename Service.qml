@@ -6,6 +6,7 @@ import "js/Config.js" as Config
 import "js/Fallback.js" as Fallback
 import "js/Theme.js" as Theme
 import "js/Format.js" as Format
+import "js/Binds.js" as Binds
 
 Item {
   id: root
@@ -64,6 +65,10 @@ Item {
   property bool stdinWorks: false
   property bool pingSent: false
   property var sendQueue: []
+  property bool bindOfferNeeded: true
+  property string bindOfferNote: ""
+  property var workQueue: []
+  property var workCurrent: null
 
   function applyHostSettings() {
     var entry = {
@@ -409,6 +414,59 @@ Item {
 
   function ping() { return "ok" }
   function status() { return root.statusJson() }
+
+  function applyBindPlan(plan) {
+    var p = plan || Binds.offer
+    root.bindOfferNeeded = !!p.needed
+    root.bindOfferNote = String(p.note || "")
+    Binds.setOffer(p)
+  }
+
+  function enqueueWork(command, done) {
+    workQueue.push({ command: command, done: done || null })
+    runWork()
+  }
+
+  function runWork() {
+    if (workProc.running || root.workCurrent)
+      return
+    if (!workQueue.length)
+      return
+    root.workCurrent = workQueue.shift()
+    workProc.command = root.workCurrent.command
+    workProc.running = true
+  }
+
+  function scanBinds() {
+    enqueueWork(["hyprctl", "-j", "binds"], function(text, code) {
+      if (Number(code) !== 0)
+        return
+      root.applyBindPlan(Binds.applyScan(text))
+    })
+  }
+
+  function installBinds(arg) {
+    enqueueWork(["hyprctl", "-j", "binds"], function(text, code) {
+      if (Number(code) !== 0) {
+        root.bindOfferNote = "could not read keybinds"
+        return
+      }
+      var plan = Binds.applyScan(text)
+      if (!plan.toAdd || !plan.toAdd.length) {
+        root.applyBindPlan(plan)
+        return
+      }
+      var lua = Binds.luaBlock(plan.toAdd)
+      enqueueWork(["python3", root.pluginDir + "/compat/install-binds.py", root.pluginId, lua], function(out, instCode) {
+        if (Number(instCode) !== 0) {
+          root.bindOfferNote = "could not write ~/.config/hypr/bindings.lua"
+          return
+        }
+        Qt.callLater(root.scanBinds)
+      })
+    })
+    return "ok"
+  }
   function open(path) { return String(root.openPath(path)) }
   function previewPath(path) { return String(root.requestPreview(path, 1)) }
   function search(q) { return String(root.query(q)) }
@@ -561,6 +619,37 @@ Item {
       return "ok"
     }
     function markFirstRun(arg: string): string { return root.markFirstRun() }
+    function installBinds(arg: string): string { return root.installBinds(arg) }
+  }
+
+  Process {
+    id: workProc
+    running: false
+    stdout: StdioCollector {
+      id: workOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var text = workOut.text
+      var job = root.workCurrent
+      root.workCurrent = null
+      if (job && job.done) {
+        try {
+          job.done(text, exitCode)
+        } catch (e) {
+          console.warn("quicklook: work callback failed", e)
+        }
+      }
+      root.runWork()
+    }
+  }
+
+  Timer {
+    id: bindScanTimer
+    interval: 3000
+    repeat: true
+    running: true
+    onTriggered: root.scanBinds()
   }
 
   function markFirstRun() {
@@ -591,6 +680,7 @@ Item {
     Protocol.reset()
     mkdirState.running = true
     whichProc.running = true
+    Qt.callLater(root.scanBinds)
   }
 
   Component.onDestruction: {

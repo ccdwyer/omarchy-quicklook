@@ -21,7 +21,7 @@ Conservative choices where the Omarchy / Quickshell / Hyprland API was not 100% 
 - **QML rich text** is the constrained `<font color>` subset the spec requires. No CSS classes, no `<span style>`.
 - **No `QtMultimedia` import.** A missing module would fail the overlay at load. Video is poster-frame-via-ffmpeg or metadata only.
 - **`.pragma library` JS** is shared across Service and Overlay in one engine. Tests strip the pragma and eval under Node.
-- **Hyprland bind collision** parses `hyprctl binds -j` as JSON objects (`key` + `modmask`). SUPER is bit 64. A whole-document string search is not used.
+- **Hyprland bind collision** parses `hyprctl binds -j` as JSON objects (`key` + `modmask`). SUPER is bit 64. A whole-document string search is not used. Lua binds are dispatcher `__lua` plus a description; "ours" is plugin id in `arg` or description `QuickLook`.
 
 ## Helper
 
@@ -106,5 +106,5 @@ Perl `SIGALRM` is not used. A child that traps `TERM` is still reaped by `KILL`.
 - Introspecting the selected file in an arbitrary file manager.
 - A second Quickshell process.
 - Network, accounts, telemetry (except the optional `fetch-helper.sh` the user runs by hand).
-- Writing Hyprland config.
+- Writing Hyprland config except an opt-in `Add keybindings` control that appends a marked `o.bind` block to `~/.config/hypr/bindings.lua` after checking `hyprctl -j binds`. Occupied combos are skipped or replaced with Super+Alt+.. Never `hl.unbind`. Super+Shift+P is stock Google Photos and is not used.
 - Using atime for ranking.
