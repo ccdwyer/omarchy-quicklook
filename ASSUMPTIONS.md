@@ -106,5 +106,5 @@ Perl `SIGALRM` is not used. A child that traps `TERM` is still reaped by `KILL`.
 - Introspecting the selected file in an arbitrary file manager.
 - A second Quickshell process.
 - Network, accounts, telemetry (except the optional `fetch-helper.sh` the user runs by hand).
-- Writing Hyprland config except an opt-in `Add keybindings` control that appends a marked `o.bind` block to `~/.config/hypr/bindings.lua` after checking `hyprctl -j binds`. Occupied combos are skipped or replaced with Super+Alt+.. Never `hl.unbind`. Super+Shift+P is stock Google Photos and is not used.
+- Writing Hyprland config: on first load the service assigns a free combo (never Super+Shift+P or Super+Ctrl+.) into a marked `o.bind` block in `~/.config/hypr/bindings.lua`, then `omarchy notification send`s the assigned keys. Occupied combos are skipped or replaced with Super+Alt+.. Never `hl.unbind`. No notify once binds are already live.
 - Using atime for ranking.

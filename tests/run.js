@@ -346,6 +346,31 @@ test("binds: already-ours via plugin id in arg hides the offer", () => {
   assert.strictEqual(p.toAdd.length, 0)
 })
 
+test("binds: notify body lists assigned keys", () => {
+  const body = Binds.notifyBody([{ chosen: "SUPER + PERIOD", desc: "QuickLook" }], [])
+  assert.ok(body.indexOf("SUPER + PERIOD — QuickLook") === 0)
+  const argv = Binds.notifyArgv("QuickLook", "QuickLook keybindings", body)
+  assert.strictEqual(argv[0], "omarchy")
+  assert.strictEqual(argv[1], "notification")
+  assert.strictEqual(argv[2], "send")
+  assert.strictEqual(argv[4], "QuickLook")
+  assert.strictEqual(argv[7], "QuickLook keybindings")
+})
+
+test("binds: claimAuto is one-shot", () => {
+  assert.strictEqual(Binds.claimAuto(), true)
+  assert.strictEqual(Binds.claimAuto(), false)
+})
+
+test("qml: no Add keybindings button", () => {
+  const overlay = fs.readFileSync(path.join(ROOT, "Overlay.qml"), "utf8")
+  const service = fs.readFileSync(path.join(ROOT, "Service.qml"), "utf8")
+  assert.ok(overlay.indexOf("Add keybindings") < 0)
+  assert.ok(overlay.indexOf('text: "keys"') < 0)
+  assert.ok(service.indexOf("Binds.claimAuto()") >= 0)
+  assert.ok(service.indexOf("notifyArgv(") >= 0)
+})
+
 test("config: firstRun persist roundtrip", () => {
   assert.strictEqual(Config.snapshot().firstRunShown, false)
   Config.markFirstRunShown()

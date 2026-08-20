@@ -7,7 +7,6 @@ import qs.Ui
 import "js/Config.js" as Config
 import "js/Theme.js" as Theme
 import "js/Format.js" as Format
-import "js/Binds.js" as Binds
 
 Item {
   id: root
@@ -25,8 +24,6 @@ Item {
   property bool pinned: false
   property bool firstRun: false
   property bool showInfo: false
-  property bool bindOfferNeeded: true
-  property string bindOfferNote: ""
   property string pluginId: "io.github.chris.quicklook"
   property string queryText: ""
   property int selectedIndex: 0
@@ -137,8 +134,6 @@ Item {
       root.requestQuery("")
     }
     Qt.callLater(function() { searchField.forceActiveFocus() })
-    bindCheck.running = true
-    root.refreshBindOffer()
   }
 
   function close() {
@@ -182,12 +177,6 @@ Item {
   function warmup(arg) { return root.callIpc("warmup", arg) }
   function preview(arg) { return root.callIpc("preview", arg) }
   function installBinds(arg) { return root.callIpc("installBinds", arg) }
-
-  function refreshBindOffer() {
-    var offer = Binds.offer || {}
-    root.bindOfferNeeded = !!offer.needed
-    root.bindOfferNote = String(offer.note || "")
-  }
 
   function callIpc(method, arg) {
     var job = { method: String(method || ""), arg: arg === undefined || arg === null ? "" : String(arg) }
@@ -425,32 +414,11 @@ Item {
     }
   }
 
-  Process {
-    id: bindCheck
-    running: false
-    command: ["hyprctl", "binds", "-j"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        var p = Binds.applyScan(text)
-        root.bindOfferNeeded = !!p.needed
-        root.bindOfferNote = String(p.note || "")
-      }
-    }
-  }
-
   Timer {
     interval: root.opened ? 80 : 400
     running: root.opened
     repeat: true
     onTriggered: root.pullService()
-  }
-
-  Timer {
-    interval: 250
-    running: root.opened
-    repeat: true
-    onTriggered: root.refreshBindOffer()
   }
 
   Timer {
@@ -798,34 +766,11 @@ Item {
 
         Text {
           width: parent.width
-          text: root.bindOfferNeeded
-                ? ("No QuickLook keys yet.\n\nPreferred: Super+. toggle.\nCombos you already use are skipped; Super+. falls back to Super+Alt+.\n\n" + (root.bindOfferNote || ""))
-                : "Super+. toggles QuickLook.\nCombos you already use are skipped."
+          text: "Super+. toggles QuickLook. Super+Alt+. is used if Super+. was already taken."
           color: root.foreground
           wrapMode: Text.WordWrap
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
-        }
-
-        Rectangle {
-          visible: root.bindOfferNeeded
-          width: bindLabel.implicitWidth + Style.space(16)
-          height: bindLabel.implicitHeight + Style.space(10)
-          radius: Math.max(4, root.cornerRadius / 2)
-          color: root.accent
-          Text {
-            id: bindLabel
-            anchors.centerIn: parent
-            text: "Add keybindings"
-            color: root.background
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
-          }
-          MouseArea {
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.installBinds("")
-          }
         }
 
         Text {

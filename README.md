@@ -65,7 +65,7 @@ sudo updatedb
 | Esc | Unpin, then close |
 | ? | Indexed roots, watch cap, cache use |
 
-If Super+. is free, the overlay first-run card offers **Add keybindings**. That writes an `o.bind` line to `~/.config/hypr/bindings.lua` (Hyprland reloads on save). Combos you already use are skipped; Super+. falls back to Super+Alt+.. Super+Shift+P is Omarchy's Google Photos bind and is never stolen. The plugin never unbinds someone else's shortcut.
+On first load the plugin writes Super+. to `~/.config/hypr/bindings.lua` if that combo is free, then pops an Omarchy notification with the key it assigned. Occupied shortcuts are skipped; Super+. falls back to Super+Alt+.. Super+Shift+P is Omarchy's Google Photos bind and is never stolen. Super+Ctrl+. is Transcode and is not used. It never unbinds someone else's key, and it will not notify again once its bind is already live.
 
 Lua binds show dispatcher `__lua` plus a description — "ours" is plugin id in `arg` or description `QuickLook`.
 
@@ -169,7 +169,7 @@ bin/quicklookd --oneshot '{"id":1,"cmd":"status"}'
 - **Index cap 500k files**, watch/poll cap 2000 directories, preview cache 500 MB. Huge homes still get a cold path (`plocate` or a bounded walk) plus the demo corpus.
 - **Frecency uses selection history + mtime, never atime** (relatime lies).
 - **Helper binary.** `bin/quicklookd` is not in this git tree (see `bin/README.md` and `CHECKSUMS.txt`). Cold-judge `plugin add --enable` uses `compat/` (Python when present, POSIX `find` + real `gio open` otherwise). `build.sh` compiles from source. `.github/workflows/release.yml` is how Linux musl binaries and verified hashes are produced — they are not invented on macOS.
-- **Keybinds are yours to add.** First open of the overlay repeats the table and the privacy sentence. The first-run card is persisted in `~/.local/state/quicklook/ui.json`.
+- **Keybinds auto-assign on first load.** Occupied combos are skipped. Never `hl.unbind`. No notify once binds are already live. First open of the overlay repeats the table and the privacy sentence. The first-run card is persisted in `~/.local/state/quicklook/ui.json`.
 
 ## v1.1 roadmap
 
