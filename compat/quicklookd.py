@@ -379,10 +379,11 @@ def _limit_child() -> None:
     # a normally-busy machine. Fork bombs are instead bounded by the wall-clock
     # group TERM-then-KILL in run_killable plus RLIMIT_CPU.
     #
-    # RLIMIT_AS is honored on Linux but unreliable on macOS/Darwin, where the
-    # dynamic linker reserves a huge virtual-address range and a 512 MiB cap
-    # makes exec fail outright. Cap address space only where it behaves.
-    if not sys.platform.startswith("darwin"):
+    # RLIMIT_AS is applied on Linux only (matching the Rust helper). On
+    # macOS/Darwin the dynamic linker reserves a huge virtual-address range and
+    # a 512 MiB cap makes exec fail outright; other platforms are left to the
+    # CPU + wall-clock group kill. Cap address space only where it behaves.
+    if sys.platform.startswith("linux"):
         limits.insert(1, ("RLIMIT_AS", 512 * 1024 * 1024))
     for name, soft in limits:
         lim = getattr(resource, name, None)
@@ -419,6 +420,25 @@ def _kill_group(proc: subprocess.Popen, pgid: int | None = None) -> None:
         proc.wait(timeout=1)
     except (subprocess.TimeoutExpired, OSError):
         pass
+
+
+def _group_has_members(pgid: int) -> bool:
+    """True if process group `pgid` still has at least one signalable member.
+
+    `killpg(pgid, 0)` is a permission/existence probe: it succeeds when the
+    group exists with a member and raises ProcessLookupError when it is empty.
+    After the leader has exited this is true iff a descendant is still alive in
+    the group (and may be holding the child's stdout/stderr open).
+    """
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # EPERM or similar: something is there we can't probe cleanly — assume
+        # a member exists so the caller reaps the group rather than hanging.
+        return True
 
 
 def _drain_capped(stream, sink: dict, key: str) -> None:
@@ -503,6 +523,19 @@ def run_killable(
         timed_out = True
         _kill_group(proc, pgid)
 
+    # The leader has now exited (cleanly or via the timeout kill above). A
+    # descendant may still be in the group holding stdout/stderr open, which
+    # would make the drain joins below hang and leak the descendant + threads.
+    # On the clean-exit path _kill_group has NOT run, so force the group down
+    # here whenever it is non-empty (TERM, grace, unconditional KILL) before
+    # joining. Skipped when the group is already empty — the common clean case —
+    # so a well-behaved tool returns with no added latency.
+    if not timed_out and _group_has_members(pgid):
+        _kill_group(proc, pgid)
+
+    # The group is guaranteed down, so every drain reaches EOF and joins
+    # promptly; the bounded join is a belt-and-suspenders backstop (the threads
+    # are daemons and can never wedge process exit).
     for t in drains:
         t.join(timeout=2)
 

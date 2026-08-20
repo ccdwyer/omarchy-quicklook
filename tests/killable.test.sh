@@ -23,6 +23,20 @@ wait
 EOF
 chmod +x "$parent"
 
+# Early-leader-exit leader: spawns a TERM-ignoring descendant that inherits
+# stdout, then EXITS IMMEDIATELY. This is the regression case — the leader
+# returns cleanly while the descendant keeps the pipes open, which used to hang
+# the drain join on the normal-exit path. The post-exit unconditional group KILL
+# must reap the descendant and the call must return promptly.
+parent_early="$WORKDIR/parent-early"
+cat > "$parent_early" << 'EOF'
+#!/bin/sh
+"$1" &
+echo $! > "$2"
+# no wait: leader exits now, descendant lingers holding stdout
+EOF
+chmod +x "$parent_early"
+
 alive() {
   kill -0 "$1" 2>/dev/null
 }
@@ -57,6 +71,43 @@ run_shell_case() {
 
 run_shell_case "host-default" ""
 run_shell_case "forced-portable" "1"
+
+# --- Shell watchdog: EARLY leader exit must still reap the descendant ---
+# The leader exits at once; without the post-exit unconditional group KILL the
+# TERM-ignoring descendant would survive (and, in the capturing paths, hold the
+# pipe open). run_watchdog must return promptly AND leave no descendant alive.
+run_shell_early_case() {
+  label="$1"
+  forceportable="$2"
+  descfile="$WORKDIR/desc-early-$label.pid"
+  : > "$descfile"
+  set +e
+  start=$(date +%s)
+  env QUICKLOOK_FORCE_SH=1 QUICKLOOK_FORCE_PORTABLE="$forceportable" \
+    sh "$ROOT/compat/quicklookd.sh" --watchdog-selftest 5 "$parent_early" "$ignore" "$descfile"
+  st=$?
+  end=$(date +%s)
+  set -e
+  if [ "$((end - start))" -ge 4 ]; then
+    echo "FAIL shell early-exit ($label) did not return promptly ($((end - start))s)"
+    exit 1
+  fi
+  sleep 1
+  if [ ! -s "$descfile" ]; then
+    echo "FAIL shell early-exit parent ($label) did not record descendant pid"
+    exit 1
+  fi
+  dpid=$(tr -d ' \n' < "$descfile")
+  if alive "$dpid"; then
+    echo "FAIL shell early-exit ($label) left TERM-ignoring descendant pid $dpid alive"
+    kill -KILL "$dpid" 2>/dev/null || true
+    exit 1
+  fi
+  echo "ok  shell early-leader-exit ($label) reaps descendant + returns promptly (status $st, pid $dpid)"
+}
+
+run_shell_early_case "host-default" ""
+run_shell_early_case "forced-portable" "1"
 
 # --- Python process-group: same descendant case ---
 python3 - << PY
@@ -118,6 +169,54 @@ def run_case(limits, tag):
 # judge actually runs) and the limits=False branch.
 run_case(True, "limits=production")
 run_case(False, "limits=off")
+
+# --- Early leader exit: leader returns cleanly, descendant lingers ---
+# The regression: run_killable's normal-exit path used to skip the group kill and
+# then join the drains with a 2s timeout, leaking the TERM-ignoring descendant
+# and its reader thread. The fix group-kills whenever the group is non-empty
+# before joining, so this must return a CompletedProcess (NOT a timeout), return
+# promptly, and leave no descendant alive.
+parent_early = work / "py-parent-early"
+parent_early.write_text("#!/bin/sh\n\"\$1\" &\necho \$! > \"\$2\"\n")  # no wait: exits now
+parent_early.chmod(parent_early.stat().st_mode | stat.S_IXUSR)
+
+def run_early_case(limits, tag):
+    pidfile.write_text("")
+    start = time.monotonic()
+    try:
+        cp = ql.run_killable(
+            [str(parent_early), str(ignore), str(pidfile)],
+            timeout_s=8,
+            capture_output=True,
+            limits=limits,
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write("FAIL python early-exit (%s) hung into a timeout\n" % tag)
+        sys.exit(1)
+    elapsed = time.monotonic() - start
+    if elapsed >= 4:
+        sys.stderr.write("FAIL python early-exit (%s) did not return promptly: %.1fs\n" % (tag, elapsed))
+        sys.exit(1)
+    time.sleep(0.3)
+    raw = pidfile.read_text().strip()
+    if not raw.isdigit():
+        sys.stderr.write("FAIL python early-exit parent (%s) did not record descendant pid: %r\n" % (tag, raw))
+        sys.exit(1)
+    dpid = int(raw)
+    try:
+        os.kill(dpid, 0)
+    except OSError:
+        print("ok  python early-leader-exit reaps descendant, no hang [%s] (%.1fs, pid %d)" % (tag, elapsed, dpid))
+    else:
+        try:
+            os.kill(dpid, 9)
+        except OSError:
+            pass
+        sys.stderr.write("FAIL python early-exit (%s) left descendant pid %d alive\n" % (tag, dpid))
+        sys.exit(1)
+
+run_early_case(True, "limits=production")
+run_early_case(False, "limits=off")
 
 # --- Flooding output must be bounded (no OOM / no deadlock) ---
 flood = work / "py-flood"

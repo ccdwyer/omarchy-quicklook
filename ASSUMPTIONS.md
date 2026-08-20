@@ -41,16 +41,23 @@ Conservative choices where the Omarchy / Quickshell / Hyprland API was not 100% 
 ### External processes (every untrusted-file spawn is killable)
 
 Every subprocess that touches an untrusted file runs in **its own process group**
-and is bounded three ways: a wall-clock deadline that TERMs then KILLs the whole
-group (descendants included, so a TERM-ignoring child cannot outlive it), a hard
-**96 KiB cap** on captured stdout/stderr that is drained concurrently (so a
-flooding child can neither exhaust memory nor deadlock on a full pipe), and CPU /
-file-size rlimits. `RLIMIT_NPROC` is deliberately **not** set: it counts the real
-user's entire existing process table, so any absolute cap makes fork /
-`pthread_create` fail on a normally-busy machine (it would break threaded tools
-like `pdftoppm`); fork bombs are bounded by `RLIMIT_CPU` + the group kill instead.
-`RLIMIT_AS` is applied on Linux only (unreliable on macOS/Darwin, where it breaks
-exec). If the process-group guarantee cannot be established (`setsid` fails, or no
+and is bounded three ways: a group TERM→grace→**unconditional KILL** applied on
+**every** leader-exit path — not only on timeout, but also when the leader exits
+cleanly while a descendant is still alive — performed *before* the drain threads
+are joined. That ordering is the load-bearing part: a TERM-ignoring descendant
+that inherits the pipes can no longer hang the join or leak, because the group is
+guaranteed dead (SIGKILL is uncatchable) before we wait on the pipes. On a clean
+exit with an already-empty group the kill is skipped, so a well-behaved tool adds
+no latency. Second bound: a hard **96 KiB cap** on captured stdout/stderr, drained
+concurrently (so a flooding child can neither exhaust memory nor deadlock on a
+full pipe). Third: CPU / file-size rlimits. `RLIMIT_NPROC` is deliberately **not**
+set: it counts the real user's entire existing process table, so any absolute cap
+makes fork / `pthread_create` fail on a normally-busy machine (it would break
+threaded tools like `pdftoppm`); fork bombs are bounded by `RLIMIT_CPU` + the
+group kill instead. `RLIMIT_AS` is applied on **Linux only** in all three impls
+(Rust gates it on `target_os = "linux"`, Python on `sys.platform == "linux"`;
+unreliable on macOS/Darwin, where a low address-space cap makes `dyld`/exec fail).
+If the process-group guarantee cannot be established (`setsid` fails, or no
 `setsid`/GNU-`timeout` in the POSIX fallback), the path-consuming feature is
 **disabled / metadata-only** rather than run unbounded.
 
@@ -66,7 +73,7 @@ Rust helper (`run_limited` = process-group + wall-clock group kill + capped drai
 | `file -b` | hex magic fallback after `infer` | `run_limited` 800 ms / 32 MB / 1s CPU |
 | `gio` / `xdg-open` / `open` | Enter / reveal (user-initiated) | `run_limited` 8s / 128 MB |
 
-Python `compat/` (`run_killable`: new session / `setsid`, wait, then SIGTERM to the process group and SIGKILL 1s later):
+Python `compat/` (`run_killable`: new session / `setsid`; on timeout, or on a clean exit while the group is still non-empty, SIGTERM the process group then SIGKILL ~1s later — *before* joining the drain threads):
 
 | Binary | Bound |
 |---|---|
@@ -76,7 +83,7 @@ Python `compat/` (`run_killable`: new session / `setsid`, wait, then SIGTERM to 
 | `ffmpeg` / `magick` / `convert` | 12s + group kill + rlimits |
 | `gio` / `xdg-open` / `open` | 8s + `start_new_session=True` + group SIGTERM then SIGKILL |
 
-POSIX `compat/quicklookd.sh` (`run_watchdog`: GNU `timeout --kill-after=1s` when available — it already uses a new process group — otherwise `setsid`/`os.setsid` plus TERM then unconditional KILL of the **group**. `watchdog_ok` is false if neither isolation method exists; path-consuming features then degrade to metadata-only):
+POSIX `compat/quicklookd.sh` (`run_watchdog`: GNU `timeout --kill-after=1s` when available — wrapped in `setsid` and followed by an unconditional group `kill -KILL` so a descendant that outlives a normal or timed-out exit is reaped, matching the portable path — otherwise the portable `setsid`/`os.setsid` watchdog: TERM then unconditional KILL of the **group** after `wait`, on every exit. `watchdog_ok` is false if neither isolation method exists; path-consuming features then degrade to metadata-only):
 
 | Binary | Bound |
 |---|---|

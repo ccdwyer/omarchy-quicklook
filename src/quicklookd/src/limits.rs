@@ -99,6 +99,28 @@ fn signal_group(pid: u32, sig: libc::c_int) {
 #[cfg(not(unix))]
 fn signal_group(_pid: u32, _sig: i32) {}
 
+/// True if the process group `pid` still has at least one signalable member.
+/// `kill(-pgid, 0)` returns 0 when the group exists with a member and -1/ESRCH
+/// when it is empty. Once the leader has exited, this is true iff a descendant
+/// is still alive in the group (and may be holding the child's pipes open).
+#[cfg(unix)]
+fn group_has_members(pid: u32) -> bool {
+    unsafe { libc::kill(-(pid as i32), 0) == 0 }
+}
+
+/// Force the whole process group down before we join the drain threads: TERM,
+/// a brief grace, then an unconditional KILL. SIGKILL is uncatchable, so any
+/// TERM-ignoring descendant is guaranteed dead afterward — which closes the
+/// child's stdout/stderr and lets the drain joins complete instead of hanging.
+#[cfg(unix)]
+fn reap_group(pid: u32) {
+    signal_group(pid, libc::SIGTERM);
+    thread::sleep(Duration::from_millis(50));
+    signal_group(pid, libc::SIGKILL);
+}
+#[cfg(not(unix))]
+fn reap_group(_pid: u32) {}
+
 /// Spawn `cmd` in its own process group, drain its output under a hard cap, and
 /// enforce a wall-clock timeout with a group TERM-then-KILL so no descendant
 /// outlives the deadline. Never buffers more than `OUTPUT_CAP` of output.
@@ -126,19 +148,26 @@ pub fn run_limited(mut cmd: Command, timeout: Duration, mem_bytes: u64, cpu_secs
     loop {
         match child.try_wait()? {
             Some(status) => {
-                // Reap any descendants the child left behind (best-effort).
-                signal_group(pid, libc_sigterm());
+                // The leader exited. A descendant still in the group may hold the
+                // child's stdout/stderr open, which would hang the drain joins
+                // below forever. If the group is non-empty, force it down (TERM,
+                // grace, unconditional KILL) *before* joining so the pipes are
+                // guaranteed closed. The common clean-exit case leaves the group
+                // empty, so a well-behaved tool returns with no added latency.
+                #[cfg(unix)]
+                if group_has_members(pid) {
+                    reap_group(pid);
+                }
                 let stdout = collect(out_h);
                 let stderr = collect(err_h);
                 return Ok(build_output(status, stdout, stderr));
             }
             None => {
                 if start.elapsed() >= timeout {
-                    signal_group(pid, libc_sigterm());
-                    thread::sleep(Duration::from_millis(50));
-                    signal_group(pid, libc_sigkill());
+                    // Timed out: TERM, grace, unconditional group KILL, reap the
+                    // leader, then join the (now-closed) drains.
+                    reap_group(pid);
                     let _ = child.wait();
-                    // Join drains so reader threads exit (pipes are closed now).
                     let _ = collect(out_h);
                     let _ = collect(err_h);
                     return Err(io::Error::new(io::ErrorKind::TimedOut, "killed"));
@@ -147,23 +176,6 @@ pub fn run_limited(mut cmd: Command, timeout: Duration, mem_bytes: u64, cpu_secs
             }
         }
     }
-}
-
-#[cfg(unix)]
-fn libc_sigterm() -> libc::c_int {
-    libc::SIGTERM
-}
-#[cfg(unix)]
-fn libc_sigkill() -> libc::c_int {
-    libc::SIGKILL
-}
-#[cfg(not(unix))]
-fn libc_sigterm() -> i32 {
-    15
-}
-#[cfg(not(unix))]
-fn libc_sigkill() -> i32 {
-    9
 }
 
 fn build_output(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> Output {
@@ -182,11 +194,20 @@ fn apply_rlimits(cmd: &mut Command, mem_bytes: u64, cpu_secs: u64) {
         let cpu = cpu_secs;
         unsafe {
             cmd.pre_exec(move || {
-                let as_lim = libc::rlimit {
-                    rlim_cur: mem,
-                    rlim_max: mem,
-                };
-                libc::setrlimit(libc::RLIMIT_AS, &as_lim);
+                // RLIMIT_AS is applied on Linux only: on macOS a low
+                // address-space cap makes dyld fail to map shared libraries and
+                // exec aborts, so it is unusable there. Linux enforces it
+                // cleanly, bounding a hostile renderer's memory.
+                #[cfg(target_os = "linux")]
+                {
+                    let as_lim = libc::rlimit {
+                        rlim_cur: mem,
+                        rlim_max: mem,
+                    };
+                    libc::setrlimit(libc::RLIMIT_AS, &as_lim);
+                }
+                #[cfg(not(target_os = "linux"))]
+                let _ = mem;
                 let cpu_lim = libc::rlimit {
                     rlim_cur: cpu,
                     rlim_max: cpu,
@@ -307,6 +328,51 @@ mod tests {
                 // kill(pid, 0) returns -1/ESRCH when the process no longer exists.
                 let alive = unsafe { libc::kill(desc, 0) } == 0;
                 assert!(!alive, "TERM-ignoring descendant {desc} survived group kill");
+            }
+        }
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_limited_early_leader_exit_does_not_hang() {
+        // The regression this guards: the group LEADER exits cleanly and
+        // immediately, but a TERM-ignoring descendant it spawned inherits
+        // stdout/stderr and keeps them open. The old code sent only TERM on the
+        // normal-exit path and then joined the drain threads, which hung forever
+        // because the descendant ignored TERM and never closed the pipes. The
+        // fix must group-KILL before joining so this returns promptly.
+        let marker = std::env::temp_dir().join(format!("ql_early_{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        // Descendant: its own sh (so `$$` is its real pid), ignores TERM, keeps
+        // stdout open in an infinite loop — only SIGKILL ends it. Leader spawns
+        // it in the background, then exits 0 at once.
+        let script = format!(
+            "sh -c 'trap \"\" TERM; echo $$ > \"{m}\"; while true; do sleep 1; done' & exit 0",
+            m = marker.display()
+        );
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&script);
+        let start = Instant::now();
+        // Generous timeout: if the fix is wrong the drain join hangs and this
+        // never returns, so completing far under the timeout proves the fix.
+        let r = run_limited(cmd, Duration::from_secs(20), 128 * 1024 * 1024, 30);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "early-leader-exit hung on the drain join: {elapsed:?}"
+        );
+        // Leader exited 0, so run_limited returns Ok with the leader's status.
+        assert!(r.is_ok(), "expected Ok on clean leader exit, got {r:?}");
+        // The TERM-ignoring descendant must have been reaped by the group KILL.
+        thread::sleep(Duration::from_millis(200));
+        if let Ok(txt) = std::fs::read_to_string(&marker) {
+            if let Ok(desc) = txt.trim().parse::<i32>() {
+                let alive = unsafe { libc::kill(desc, 0) } == 0;
+                assert!(
+                    !alive,
+                    "TERM-ignoring descendant {desc} survived after early leader exit"
+                );
             }
         }
         let _ = std::fs::remove_file(&marker);

@@ -104,6 +104,25 @@ portable_watchdog() {
   return $st
 }
 
+# Run GNU `timeout ...` inside a new session so the whole subtree shares one
+# process group, then unconditionally KILL that group once timeout returns.
+# `timeout --kill-after` already bounds the *direct* child on the timeout path;
+# this adds the portable watchdog's guarantee that a descendant which outlives a
+# NORMAL (or timed-out) leader exit is reaped instead of leaking / holding pipes
+# open. Without setsid we cannot forge a separate group, so we fall back to plain
+# timeout (the direct child is still bounded).
+gnu_group_watchdog() {
+  if [ "$HAVE_SETSID" = 1 ]; then
+    setsid "$@" &
+    gpid=$!
+    st=0
+    wait "$gpid" || st=$?
+    kill -KILL -"$gpid" 2>/dev/null || true
+    return $st
+  fi
+  "$@"
+}
+
 run_watchdog() {
   secs=$1
   shift
@@ -111,10 +130,10 @@ run_watchdog() {
   watchdog_ok || return 124
   case "$TIMEOUT_STYLE" in
     gnu-long)
-      "$TIMEOUT_BIN" --kill-after=1s "${secs}s" "$@"
+      gnu_group_watchdog "$TIMEOUT_BIN" --kill-after=1s "${secs}s" "$@"
       ;;
     gnu-short)
-      "$TIMEOUT_BIN" -k 1 "$secs" "$@"
+      gnu_group_watchdog "$TIMEOUT_BIN" -k 1 "$secs" "$@"
       ;;
     *)
       portable_watchdog "$secs" "$@"
