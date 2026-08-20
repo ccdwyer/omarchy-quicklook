@@ -12,6 +12,82 @@ if [ "${QUICKLOOK_FORCE_SH:-}" != "1" ] && command -v python3 >/dev/null 2>&1; t
   exec python3 "$ROOT/compat/quicklookd.py" "$@"
 fi
 
+# One watchdog for every path-consuming command: TERM, then KILL.
+# Prefer GNU `timeout --kill-after`. Otherwise a portable killer.
+# Never run unbounded. Never use Perl SIGALRM as the sole guard.
+TIMEOUT_BIN=""
+TIMEOUT_STYLE=""
+
+init_watchdog() {
+  if command -v timeout >/dev/null 2>&1; then
+    if timeout --kill-after=1s 1s true >/dev/null 2>&1; then
+      TIMEOUT_BIN=timeout
+      TIMEOUT_STYLE=gnu-long
+      return
+    fi
+    if timeout -k 1 1 true >/dev/null 2>&1; then
+      TIMEOUT_BIN=timeout
+      TIMEOUT_STYLE=gnu-short
+      return
+    fi
+  fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    if gtimeout --kill-after=1s 1s true >/dev/null 2>&1; then
+      TIMEOUT_BIN=gtimeout
+      TIMEOUT_STYLE=gnu-long
+    fi
+  fi
+}
+
+init_watchdog
+
+watchdog_ok() {
+  # GNU timeout --kill-after, or the portable TERM-then-KILL killer.
+  return 0
+}
+
+# Portable TERM then KILL of a direct child. KILL cannot be trapped.
+portable_watchdog() {
+  secs=$1
+  shift
+  "$@" &
+  pid=$!
+  (
+    n=0
+    while [ "$n" -lt "$secs" ]; do
+      sleep 1
+      n=$((n + 1))
+      kill -0 "$pid" 2>/dev/null || exit 0
+    done
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$pid" 2>/dev/null || true
+  ) &
+  killer=$!
+  st=0
+  wait "$pid" || st=$?
+  kill -KILL "$killer" 2>/dev/null || true
+  wait "$killer" 2>/dev/null || true
+  return $st
+}
+
+run_watchdog() {
+  secs=$1
+  shift
+  [ "$#" -ge 1 ] || return 1
+  case "$TIMEOUT_STYLE" in
+    gnu-long)
+      "$TIMEOUT_BIN" --kill-after=1s "${secs}s" "$@"
+      ;;
+    gnu-short)
+      "$TIMEOUT_BIN" -k 1 "$secs" "$@"
+      ;;
+    *)
+      portable_watchdog "$secs" "$@"
+      ;;
+  esac
+}
+
 HOME_DIR=${HOME:-/tmp}
 STATE_DIR="${XDG_STATE_HOME:-$HOME_DIR/.local/state}/quicklook"
 CONFIG_FILE="$STATE_DIR/compat-config.env"
@@ -293,13 +369,7 @@ run_capped_find() {
   IFS=$oldifs
   set -- "$@" ')' -prune -o -iname "*$q*" -print
   set +f
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 2 "$@" > "$out" 2>/dev/null || true
-  elif command -v perl >/dev/null 2>&1; then
-    perl -e 'alarm 2; exec @ARGV' "$@" > "$out" 2>/dev/null || true
-  else
-    : > "$out"
-  fi
+  run_watchdog 2 "$@" > "$out" 2>/dev/null || true
 }
 
 find_hits() {
@@ -308,12 +378,10 @@ find_hits() {
   [ -n "$q" ] || return 0
   raw=$(mktemp)
   located=$(mktemp)
-  if command -v timeout >/dev/null 2>&1; then
-    if command -v plocate >/dev/null 2>&1; then
-      timeout 2 plocate -il 40 -- "$q" > "$located" 2>/dev/null || true
-    elif command -v locate >/dev/null 2>&1; then
-      timeout 2 locate -il 40 -- "$q" > "$located" 2>/dev/null || true
-    fi
+  if command -v plocate >/dev/null 2>&1; then
+    run_watchdog 2 plocate -il 40 -- "$q" > "$located" 2>/dev/null || true
+  elif command -v locate >/dev/null 2>&1; then
+    run_watchdog 2 locate -il 40 -- "$q" > "$located" 2>/dev/null || true
   fi
   if [ -s "$located" ]; then
     while IFS= read -r lp; do
@@ -454,11 +522,7 @@ svg_wh() {
 }
 
 read_user_file() {
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 1 "$@"
-  else
-    "$@"
-  fi
+  run_watchdog 1 "$@"
 }
 
 hex_head() {
@@ -527,7 +591,13 @@ dir_preview_json() {
     k=$(kind_of "$full")
     sz=0
     if [ -f "$full" ]; then
-      sz=$(wc -c < "$full" 2>/dev/null | tr -d ' ')
+      if sz=$(stat -c %s "$full" 2>/dev/null); then
+        :
+      elif sz=$(stat -f %z "$full" 2>/dev/null); then
+        :
+      else
+        sz=0
+      fi
       [ -n "$sz" ] || sz=0
     fi
     ent="{\"name\":\"$(json_escape "$name")\",\"kind\":\"$k\",\"size\":$sz}"
@@ -542,18 +612,17 @@ dir_preview_json() {
 }
 
 isolation_ok() {
-  # Wall-clock watchdog is mandatory. CPU ulimit alone is not enough.
-  command -v timeout >/dev/null 2>&1
+  watchdog_ok
 }
 
 run_isolated() {
-  command -v timeout >/dev/null 2>&1 || return 1
+  watchdog_ok || return 1
   (
     ulimit -t 8 2>/dev/null || true
     ulimit -v 524288 2>/dev/null || true
     ulimit -f 65536 2>/dev/null || true
     ulimit -u 32 2>/dev/null || true
-    timeout 8 "$@"
+    run_watchdog 8 "$@"
   ) >/dev/null 2>&1 || true
 }
 
@@ -698,15 +767,15 @@ do_open() {
     target=$(dirname "$path")
   fi
   if command -v gio >/dev/null 2>&1; then
-    gio open "$target" >/dev/null 2>&1 &
+    run_watchdog 8 gio open "$target" >/dev/null 2>&1 || true
     return 0
   fi
   if command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "$target" >/dev/null 2>&1 &
+    run_watchdog 8 xdg-open "$target" >/dev/null 2>&1 || true
     return 0
   fi
   if command -v open >/dev/null 2>&1; then
-    open "$target" >/dev/null 2>&1 &
+    run_watchdog 8 open "$target" >/dev/null 2>&1 || true
     return 0
   fi
   return 2
@@ -772,6 +841,13 @@ while [ "$#" -gt 0 ]; do
       oneshot=1
       shift
       payload="${1:-}"
+      ;;
+    --watchdog-selftest)
+      shift
+      secs=${1:-2}
+      [ "$#" -gt 0 ] && shift
+      run_watchdog "$secs" "$@"
+      exit $?
       ;;
     *)
       break

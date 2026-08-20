@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -271,12 +272,11 @@ def plocate_names(q: str, limit: int) -> list[dict] | None:
     if not binary:
         return None
     try:
-        proc = subprocess.run(
+        proc = run_killable(
             [binary, "-il", str(limit), "--", q],
+            timeout_s=2,
             capture_output=True,
             text=True,
-            timeout=2,
-            preexec_fn=_limit_child,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -319,9 +319,7 @@ def find_names(q: str, limit: int) -> list[dict]:
     cmd = ["find", *roots, "-mindepth", "1"]
     cmd.extend(["(", *prune, ")", "-prune", "-o", "-iname", f"*{q}*", "-print"])
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=2, preexec_fn=_limit_child
-        )
+        proc = run_killable(cmd, timeout_s=2, capture_output=True, text=True)
     except (subprocess.TimeoutExpired, OSError):
         return []
     return _hits_from_paths(proc.stdout.splitlines(), q, cap)
@@ -379,6 +377,78 @@ def _limit_child() -> None:
             resource.setrlimit(lim, (soft, soft))
         except (ValueError, OSError):
             pass
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=1)
+        return
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=1)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def run_killable(
+    argv: list[str],
+    timeout_s: float = 8,
+    capture_output: bool = False,
+    text: bool = False,
+    limits: bool = True,
+) -> subprocess.CompletedProcess:
+    """Spawn in a new session and kill the whole process group on timeout."""
+    stdout = subprocess.PIPE if capture_output else subprocess.DEVNULL
+    stderr = subprocess.PIPE if capture_output else subprocess.DEVNULL
+    # New session so timeout can kill the whole group. Cannot combine
+    # start_new_session with preexec_fn; setsid in preexec when limits apply.
+    if limits:
+        def preexec() -> None:
+            try:
+                os.setsid()
+            except OSError:
+                pass
+            _limit_child()
+
+        extra = {"preexec_fn": preexec}
+    else:
+        extra = {"start_new_session": True}
+
+    proc = subprocess.Popen(
+        argv,
+        stdout=stdout,
+        stderr=stderr,
+        **extra,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        _kill_group(proc)
+        try:
+            out, err = proc.communicate(timeout=2)
+        except (subprocess.TimeoutExpired, OSError):
+            out, err = exc.output or b"", exc.stderr or b""
+        raise subprocess.TimeoutExpired(argv, timeout_s, output=out, stderr=err) from None
+    if text:
+        enc = sys.getdefaultencoding()
+        out = out.decode(enc, errors="replace") if isinstance(out, (bytes, bytearray)) else (out or "")
+        err = err.decode(enc, errors="replace") if isinstance(err, (bytes, bytearray)) else (err or "")
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 
 def svg_dims(path: Path) -> tuple[int, int] | None:
@@ -512,12 +582,7 @@ def downsample_image(path: Path, w: int, h: int) -> dict | None:
         cmds.append(["convert", src, "-resize", f"{nw}x{nh}", dst])
     for cmd in cmds:
         try:
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                timeout=12,
-                preexec_fn=_limit_child,
-            )
+            run_killable(cmd, timeout_s=12, capture_output=True)
         except (subprocess.TimeoutExpired, OSError):
             continue
         if dest.is_file() and dest.stat().st_size > 0:
@@ -562,12 +627,11 @@ def pdf_page_count(path: Path) -> int:
     info = shutil.which("pdfinfo")
     if info:
         try:
-            proc = subprocess.run(
+            proc = run_killable(
                 [info, str(path)],
+                timeout_s=2,
                 capture_output=True,
                 text=True,
-                timeout=2,
-                preexec_fn=_limit_child,
             )
             for line in proc.stdout.splitlines():
                 if line.startswith("Pages:"):
@@ -629,7 +693,7 @@ def preview_pdf(path: Path, page: int = 1) -> dict:
         }
     prefix = dest.with_suffix("")
     try:
-        proc = subprocess.run(
+        proc = run_killable(
             [
                 "pdftoppm",
                 "-f",
@@ -643,9 +707,8 @@ def preview_pdf(path: Path, page: int = 1) -> dict:
                 str(path),
                 str(prefix),
             ],
+            timeout_s=8,
             capture_output=True,
-            timeout=8,
-            preexec_fn=_limit_child,
         )
     except (subprocess.TimeoutExpired, OSError):
         proc = None
@@ -756,7 +819,10 @@ def open_path(path_s: str, reveal: bool = False) -> dict:
         args = [str(target)]
     if opener is None:
         return {"ok": False, "error": "no opener"}
-    subprocess.Popen([opener, *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        run_killable([opener, *args], timeout_s=8, limits=False)
+    except (subprocess.TimeoutExpired, OSError):
+        return {"ok": False, "error": "opener timeout"}
     return {"ok": True}
 
 

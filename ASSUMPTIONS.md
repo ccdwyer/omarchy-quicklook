@@ -52,25 +52,27 @@ Rust helper (`run_limited` = wall-clock kill + rlimits):
 | `file -b` | hex magic fallback after `infer` | `run_limited` 800 ms / 32 MB / 1s CPU |
 | `gio` / `xdg-open` / `open` | Enter / reveal (user-initiated) | `run_limited` 8s / 128 MB |
 
-Python `compat/` (`subprocess.run(..., timeout=, preexec_fn=_limit_child)`):
+Python `compat/` (`run_killable`: new session / `setsid`, wait, then SIGTERM to the process group and SIGKILL 1s later):
 
 | Binary | Bound |
 |---|---|
-| `plocate` / `locate` | timeout 2s + rlimits |
-| `find` | timeout 2s + rlimits |
-| `pdftoppm` / `pdfinfo` | timeout 8s / 2s + rlimits |
-| `ffmpeg` / `magick` / `convert` | timeout 12s + rlimits |
-| `gio` / `xdg-open` / `open` | fire-and-forget `Popen` (user-initiated, not waited on) |
+| `plocate` / `locate` | 2s + group kill + rlimits |
+| `find` | 2s + group kill + rlimits |
+| `pdftoppm` / `pdfinfo` | 8s / 2s + group kill + rlimits |
+| `ffmpeg` / `magick` / `convert` | 12s + group kill + rlimits |
+| `gio` / `xdg-open` / `open` | 8s + `start_new_session=True` + group SIGTERM then SIGKILL |
 
-POSIX `compat/quicklookd.sh`:
+POSIX `compat/quicklookd.sh` (`run_watchdog`: GNU `timeout --kill-after=1s` when available, otherwise portable TERM then KILL of the child):
 
 | Binary | Bound |
 |---|---|
-| `plocate` / `locate` | `timeout 2` or skipped |
-| `find` | `timeout 2` (or `perl alarm 2`); skipped if neither exists |
-| `pdftoppm` / `ffmpeg` / `magick` / `convert` | `timeout 8` + ulimits; metadata-only without `timeout` |
-| `dd` / `od` / `head` / `ls` (user files) | `timeout 1` when `timeout` exists |
-| `gio` / `xdg-open` / `open` | background `&` (user-initiated, not waited on) |
+| `plocate` / `locate` / `find` | `run_watchdog` 2s |
+| `pdftoppm` / `ffmpeg` / `magick` / `convert` | `run_watchdog` 8s + ulimits |
+| `dd` / `od` / `head` / `ls` (user files) | `run_watchdog` 1s |
+| `gio` / `xdg-open` / `open` | `run_watchdog` 8s (foreground; never `&`) |
+| directory sizes | `stat` metadata, not `wc` of file contents |
+
+Perl `SIGALRM` is not used. A child that traps `TERM` is still reaped by `KILL`.
 
 ## Out of scope (intentional, spec + tribunal)
 

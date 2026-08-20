@@ -183,3 +183,5 @@ printf '%s\n' "$esc" | grep -Fq '\"' || { printf 'FAIL json_escape quote: %s\n' 
 printf '%s\n' "$esc" | grep -Fq '\t' || { printf 'FAIL json_escape tab: %s\n' "$esc"; exit 1; }
 printf '%s\n' "$esc" | grep -q 'a' || { printf 'FAIL json_escape dropped text: %s\n' "$esc"; exit 1; }
 echo "ok  json escape quote/newline/tab"
+
+sh "$ROOT/tests/killable.test.sh"

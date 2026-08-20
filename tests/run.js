@@ -349,10 +349,9 @@ test("pdfinfo is isolated; posix timeout is mandatory; build.sh does not mask fa
   assert.ok(preview.indexOf("run_limited") >= 0)
   assert.ok(!/Command::new\(info\)\.arg\(path\)\.output\(\)/.test(preview))
   const sh = fs.readFileSync(path.join(ROOT, "compat/quicklookd.sh"), "utf8")
-  assert.ok(/command -v timeout/.test(sh))
-  const iso = sh.slice(sh.indexOf("isolation_ok"), sh.indexOf("run_isolated"))
-  assert.ok(iso.indexOf("timeout") >= 0)
-  assert.ok(!/ulimit -t/.test(iso))
+  assert.ok(sh.indexOf("--kill-after") >= 0)
+  assert.ok(sh.indexOf("watchdog_ok") >= 0)
+  assert.ok(sh.indexOf("kill -KILL") >= 0)
   const build = fs.readFileSync(path.join(ROOT, "build.sh"), "utf8")
   assert.ok(build.indexOf("cargo build FAILED") >= 0)
   assert.ok(!/cp "\$ROOT\/compat\/quicklookd.sh" "\$OUT\/quicklookd"/.test(build))
@@ -369,10 +368,33 @@ test("no unbounded subprocesses on untrusted files; json escape; cache rejects e
   const limits = fs.readFileSync(path.join(ROOT, "src/quicklookd/src/limits.rs"), "utf8")
   assert.ok(limits.indexOf("with_path_lock") >= 0)
   const sh = fs.readFileSync(path.join(ROOT, "compat/quicklookd.sh"), "utf8")
-  assert.ok(sh.indexOf("timeout 2 plocate") >= 0 || sh.indexOf("timeout 2 locate") >= 0)
+  assert.ok(sh.indexOf("--kill-after") >= 0)
+  assert.ok(sh.indexOf("kill -KILL") >= 0)
+  assert.ok(sh.indexOf("run_watchdog 8 gio open") >= 0)
+  assert.ok(sh.indexOf("gio open \"$target\" >/dev/null 2>&1 &") < 0)
+  assert.ok(sh.indexOf("perl -e") < 0)
   assert.ok(sh.indexOf("od -An -t u1") >= 0)
+  const py = fs.readFileSync(path.join(ROOT, "compat/quicklookd.py"), "utf8")
+  assert.ok(py.indexOf("run_killable") >= 0)
+  assert.ok(py.indexOf("start_new_session") >= 0)
+  assert.ok(!/subprocess\.Popen\(\[opener/.test(py))
   const bin = fs.readFileSync(path.join(ROOT, "bin/quicklook"), "utf8")
   assert.ok(bin.indexOf("od -An -t u1") >= 0)
+})
+
+test("TERM-ignoring fallback children are reaped by KILL", () => {
+  const { spawnSync } = require("child_process")
+  const r = spawnSync("sh", [path.join(ROOT, "tests/killable.test.sh")], {
+    encoding: "utf8",
+    timeout: 40000
+  })
+  if (r.status !== 0) {
+    process.stderr.write(r.stdout || "")
+    process.stderr.write(r.stderr || "")
+  }
+  assert.strictEqual(r.status, 0)
+  assert.ok((r.stdout || "").indexOf("posix watchdog KILL") >= 0)
+  assert.ok((r.stdout || "").indexOf("python process-group KILL") >= 0)
 })
 
 test("manifest: id, kinds, entryPoints", () => {
