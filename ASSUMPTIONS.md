@@ -106,5 +106,5 @@ Perl `SIGALRM` is not used. A child that traps `TERM` is still reaped by `KILL`.
 - Introspecting the selected file in an arbitrary file manager.
 - A second Quickshell process.
 - Network, accounts, telemetry (except the optional `fetch-helper.sh` the user runs by hand).
-- Writing Hyprland config: on first load the service assigns a free combo (never Super+Shift+P or Super+Ctrl+.) into a marked `o.bind` block in `~/.config/hypr/bindings.lua`, then `omarchy notification send`s the assigned keys. Occupied combos are skipped or replaced with Super+Alt+.. Never `hl.unbind`. No notify once binds are already live.
+- Writing Hyprland config: first load does **not** assign a bind. The bar chip offers **Set hotkey**; only that click writes a marked `o.bind` block (never Super+Shift+P or Super+Ctrl+.). Occupied combos are skipped or replaced with Super+Alt+.. **Remove** on the chip (and `install-binds.py --remove`) strips that block. Never `hl.unbind`.
 - Using atime for ranking.

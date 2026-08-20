@@ -4,6 +4,11 @@
 // Lua binds show up as dispatcher "__lua" with a description, not the
 // omarchy-shell command in `arg`, so "ours" is plugin-id in arg OR our
 // descriptions.
+//
+// Writes happen only when the bar chip's "Set hotkey" (or Remove) is
+// clicked. Never auto-assign on first load. Never hl.unbind others.
+// Super+Shift+P (Google Photos) and Super+Ctrl+. (Transcode) are never
+// candidates.
 
 var PLUGIN_ID = "io.github.chris.quicklook"
 var SUPER = 64
@@ -28,17 +33,10 @@ var offer = {
     needed: true,
     note: "",
     installed: 0,
+    hotkeyLabel: "",
+    canSet: false,
     toAdd: [],
     skipped: []
-}
-
-var autoClaimed = false
-
-function claimAuto() {
-    if (autoClaimed)
-        return false
-    autoClaimed = true
-    return true
 }
 
 function setOffer(next) {
@@ -94,6 +92,64 @@ function oursCount(binds) {
             n++
     }
     return n
+}
+
+function comboFromBind(bind) {
+    if (!bind)
+        return ""
+    var m = Number(bind.modmask) || 0
+    var parts = []
+    if (m & SUPER)
+        parts.push("SUPER")
+    if (m & CTRL)
+        parts.push("CTRL")
+    if (m & SHIFT)
+        parts.push("SHIFT")
+    if (m & ALT)
+        parts.push("ALT")
+    var k = keyOf(bind)
+    if (k === ".")
+        k = "PERIOD"
+    if (!k)
+        return ""
+    parts.push(k)
+    return parts.join(" + ")
+}
+
+function oursCombos(binds) {
+    var out = []
+    var seen = {}
+    var list = binds || []
+    for (var i = 0; i < list.length; i++) {
+        if (!isOurs(list[i]))
+            continue
+        var keys = comboFromBind(list[i])
+        if (!keys || seen[keys])
+            continue
+        seen[keys] = true
+        out.push(keys)
+    }
+    return out
+}
+
+function prettyCombo(keys) {
+    var s = String(keys || "")
+    s = s.replace(/SUPER/gi, "Super")
+    s = s.replace(/CONTROL/gi, "Ctrl")
+    s = s.replace(/CTRL/gi, "Ctrl")
+    s = s.replace(/SHIFT/gi, "Shift")
+    s = s.replace(/ALT/gi, "Alt")
+    s = s.replace(/PERIOD/gi, ".")
+    s = s.replace(/ \+ /g, "+")
+    return s
+}
+
+function prettyList(keysList) {
+    var list = keysList || []
+    var out = []
+    for (var i = 0; i < list.length; i++)
+        out.push(prettyCombo(list[i]))
+    return out.join(", ")
 }
 
 function comboOwner(binds, modmask, key) {
@@ -155,6 +211,7 @@ function plan(binds) {
     var needed = already === 0
     if (!needed)
         toAdd = []
+    var installedKeys = oursCombos(binds)
     var note = ""
     if (!needed)
         note = ""
@@ -166,7 +223,16 @@ function plan(binds) {
         for (var s = 0; s < skipped.length; s++)
             note += " — skipped " + skipped[s].keys + " (" + skipped[s].conflict + ")"
     }
-    return { needed: needed, already: already, toAdd: toAdd, skipped: skipped, note: note }
+    return {
+        needed: needed,
+        already: already,
+        toAdd: toAdd,
+        skipped: skipped,
+        note: note,
+        installed: installedKeys,
+        hotkeyLabel: prettyList(installedKeys),
+        canSet: needed && toAdd.length > 0
+    }
 }
 
 function luaLine(item) {

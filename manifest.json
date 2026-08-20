@@ -6,10 +6,17 @@
   "author": "chris",
   "license": "MIT",
   "description": "Fuzzy-find any file and preview it instantly: images, code, PDFs, CSVs — Space to pin, Enter to open.",
-  "kinds": ["overlay", "service"],
+  "kinds": ["overlay", "service", "bar-widget"],
   "keepLoaded": true,
   "entryPoints": {
     "overlay": "Overlay.qml",
-    "service": "Service.qml"
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "QuickLook",
+    "category": "Tools",
+    "allowMultiple": false,
+    "defaultSection": "right"
   }
 }

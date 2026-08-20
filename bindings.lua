@@ -1,10 +1,11 @@
 -- QuickLook keybind snippet for Omarchy / Hyprland.
 -- Default: SUPER + PERIOD (.). Alternate: SUPER + ALT + PERIOD.
 -- Super+Shift+P is stock Google Photos — never steal it.
+-- Super+Ctrl+. is Transcode — never steal it.
 --
--- The overlay first-run card can write a marked o.bind block via
--- `omarchy-shell io.github.chris.quicklook installBinds ''`.
--- Paste these lines only if you prefer to bind by hand.
+-- Opt-in from the bar chip ("Set hotkey"), which writes a marked o.bind
+-- block. First load does not auto-assign. Paste these lines only if you
+-- prefer to bind by hand.
 --
 --   o.bind("SUPER + PERIOD", "QuickLook", "omarchy-shell shell toggle io.github.chris.quicklook '{}'")
 --   o.bind("SUPER + ALT + PERIOD", "QuickLook", "omarchy-shell shell toggle io.github.chris.quicklook '{}'")

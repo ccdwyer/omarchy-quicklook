@@ -66,7 +66,9 @@ Item {
   property bool pingSent: false
   property var sendQueue: []
   property bool bindOfferNeeded: true
+  property bool bindCanSet: false
   property string bindOfferNote: ""
+  property string bindHotkeyLabel: ""
   property var workQueue: []
   property var workCurrent: null
 
@@ -361,7 +363,11 @@ Item {
       progress: root.indexProgress,
       results: root.lastResults.length,
       caps: root.lastCaps,
-      status: root.lastStatus
+      status: root.lastStatus,
+      bindOfferNeeded: root.bindOfferNeeded,
+      bindCanSet: root.bindCanSet,
+      bindHotkeyLabel: root.bindHotkeyLabel,
+      bindOfferNote: root.bindOfferNote
     })
   }
 
@@ -431,7 +437,9 @@ Item {
   function applyBindPlan(plan) {
     var p = plan || Binds.offer
     root.bindOfferNeeded = !!p.needed
+    root.bindCanSet = !!p.canSet
     root.bindOfferNote = String(p.note || "")
+    root.bindHotkeyLabel = String(p.hotkeyLabel || "")
     Binds.setOffer(p)
   }
 
@@ -454,10 +462,7 @@ Item {
     enqueueWork(["hyprctl", "-j", "binds"], function(text, code) {
       if (Number(code) !== 0)
         return
-      var plan = Binds.applyScan(text)
-      root.applyBindPlan(plan)
-      if (plan.needed && plan.toAdd && plan.toAdd.length && Binds.claimAuto())
-        root.installBinds("auto")
+      root.applyBindPlan(Binds.applyScan(text))
     })
   }
 
@@ -488,6 +493,17 @@ Item {
         root.notifyNewBinds(plan)
         Qt.callLater(root.scanBinds)
       })
+    })
+    return "ok"
+  }
+
+  function removeBinds(arg) {
+    enqueueWork(["python3", root.pluginDir + "/compat/install-binds.py", "--remove", root.pluginId], function(out, rmCode) {
+      if (Number(rmCode) !== 0) {
+        root.bindOfferNote = "could not update ~/.config/hypr/bindings.lua"
+        return
+      }
+      Qt.callLater(root.scanBinds)
     })
     return "ok"
   }
@@ -644,6 +660,7 @@ Item {
     }
     function markFirstRun(arg: string): string { return root.markFirstRun() }
     function installBinds(arg: string): string { return root.installBinds(arg) }
+    function removeBinds(arg: string): string { return root.removeBinds(arg) }
   }
 
   Process {

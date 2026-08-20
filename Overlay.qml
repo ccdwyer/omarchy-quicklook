@@ -177,6 +177,7 @@ Item {
   function warmup(arg) { return root.callIpc("warmup", arg) }
   function preview(arg) { return root.callIpc("preview", arg) }
   function installBinds(arg) { return root.callIpc("installBinds", arg) }
+  function removeBinds(arg) { return root.callIpc("removeBinds", arg) }
 
   function callIpc(method, arg) {
     var job = { method: String(method || ""), arg: arg === undefined || arg === null ? "" : String(arg) }
@@ -774,7 +775,7 @@ Item {
 
         Text {
           width: parent.width
-          text: "Super+. toggles QuickLook. Super+Alt+. is used if Super+. was already taken."
+          text: "Click the bar chip to toggle. Set a hotkey from the chip (Super+. if free, else Super+Alt+.). Super+Shift+P (Photos) and Super+Ctrl+. (Transcode) are never stolen."
           color: root.foreground
           wrapMode: Text.WordWrap
           font.family: root.fontFamily

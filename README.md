@@ -4,7 +4,7 @@ Fuzzy-find any file and preview it instantly: images, syntax-highlighted code, P
 
 Indexes `$HOME` by default (skips `.ssh`, `.gnupg`, password-store, keyrings, `node_modules`, `target`, `.git`, and other hidden directories). Preview cache is LRU-capped at 500 MB under `~/.cache/quicklook`. Selection history lives in `~/.local/state/quicklook/`. Nothing leaves the machine.
 
-This is an Omarchy shell plugin (service + overlay). It runs inside the long-lived `omarchy-shell` process. It does not start a second Quickshell instance.
+This is an Omarchy shell plugin (service + overlay + bar-widget). It runs inside the long-lived `omarchy-shell` process. It does not start a second Quickshell instance. The bar chip starts in `barWidget.defaultSection` (`right`). Click it to toggle the finder.
 
 ![QuickLook demo corpus — invoice, photo, table, Rust, README](demo.gif)
 
@@ -55,8 +55,9 @@ sudo updatedb
 
 | Combo | Action |
 |---|---|
-| Super+. | Toggle finder + preview (default) |
-| Super+Alt+. | Alternate toggle if Super+. collides |
+| Bar chip | Toggle finder + preview |
+| Super+. | Suggested toggle (opt-in from the bar) |
+| Super+Alt+. | Alternate if Super+. is already taken |
 | ↑ ↓ | Move selection (preview follows) |
 | Space | Pin / unpin fullscreen preview |
 | j / k | Next / previous PDF page when pinned |
@@ -65,7 +66,7 @@ sudo updatedb
 | Esc | Unpin, then close |
 | ? | Indexed roots, watch cap, cache use |
 
-On first load the plugin writes Super+. to `~/.config/hypr/bindings.lua` if that combo is free, then pops an Omarchy notification with the key it assigned. Occupied shortcuts are skipped; Super+. falls back to Super+Alt+.. Super+Shift+P is Omarchy's Google Photos bind and is never stolen. Super+Ctrl+. is Transcode and is not used. It never unbinds someone else's key, and it will not notify again once its bind is already live.
+A hotkey is **opt-in**. Enabling the plugin does not write `~/.config/hypr/bindings.lua`. If no hotkey is set, the bar chip offers **Set hotkey** — only that click writes a marked `o.bind` block. Super+. is used when free; otherwise Super+Alt+.. Super+Shift+P is Omarchy's Google Photos bind and is never stolen. Super+Ctrl+. is Transcode and is not used. If a hotkey is set, the chip shows it and offers **Remove**, which strips that marked block. It never calls `hl.unbind` on anyone else's key.
 
 Lua binds show dispatcher `__lua` plus a description — "ours" is plugin id in `arg` or description `QuickLook`.
 
@@ -140,6 +141,7 @@ omarchy-shell io.github.chris.quicklook theme '{"bg":"#1e1e2e","fg":"#cdd6f4","a
 omarchy-shell io.github.chris.quicklook prefetch /tmp/file.pdf
 omarchy-shell io.github.chris.quicklook warmup ''
 omarchy-shell io.github.chris.quicklook installBinds ''
+omarchy-shell io.github.chris.quicklook removeBinds ''
 ```
 
 `preview` takes either a bare path or a `{"path":…,"page":N}` object. Overlay
@@ -169,7 +171,7 @@ bin/quicklookd --oneshot '{"id":1,"cmd":"status"}'
 - **Index cap 500k files**, watch/poll cap 2000 directories, preview cache 500 MB. Huge homes still get a cold path (`plocate` or a bounded walk) plus the demo corpus.
 - **Frecency uses selection history + mtime, never atime** (relatime lies).
 - **Helper binary.** `bin/quicklookd` is not in this git tree (see `bin/README.md` and `CHECKSUMS.txt`). Cold-judge `plugin add --enable` uses `compat/` (Python when present, POSIX `find` + real `gio open` otherwise). `build.sh` compiles from source. `.github/workflows/release.yml` is how Linux musl binaries and verified hashes are produced — they are not invented on macOS.
-- **Keybinds auto-assign on first load.** Occupied combos are skipped. Never `hl.unbind`. No notify once binds are already live. First open of the overlay repeats the table and the privacy sentence. The first-run card is persisted in `~/.local/state/quicklook/ui.json`.
+- **Keybinds are opt-in from the bar chip.** First load does not write `bindings.lua`. Occupied combos are skipped. Never `hl.unbind`. First open of the overlay repeats the table and the privacy sentence. The first-run card is persisted in `~/.local/state/quicklook/ui.json`.
 
 ## v1.1 roadmap
 
@@ -188,6 +190,19 @@ cargo test --manifest-path src/quicklookd/Cargo.toml
 
 ## Remove
 
+If you clicked **Set hotkey**, a marked `o.bind` block lives in `~/.config/hypr/bindings.lua`. Strip that block first, then remove the plugin:
+
 ```sh
+python3 ~/.config/omarchy/plugins/io.github.chris.quicklook/compat/install-binds.py --remove io.github.chris.quicklook
 omarchy plugin remove io.github.chris.quicklook
 ```
+
+`Remove` on the bar chip does the same strip while the plugin is still installed. If the plugin directory is already gone, delete the marked block by hand:
+
+```
+-- BEGIN io.github.chris.quicklook
+o.bind("SUPER + PERIOD", "QuickLook", "omarchy-shell shell toggle io.github.chris.quicklook '{}'")
+-- END io.github.chris.quicklook
+```
+
+Hyprland reloads `bindings.lua` on save. The plugin never calls `hl.unbind`.
