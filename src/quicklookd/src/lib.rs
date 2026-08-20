@@ -210,6 +210,10 @@ impl Engine {
         self.inner.index_gen.load(Ordering::SeqCst)
     }
 
+    pub fn cache_budget(&self) -> u64 {
+        self.inner.cache.budget()
+    }
+
     pub fn handle_line(&self, line: &str) -> String {
         match protocol::parse(line) {
             Ok(req) => serde_json::to_string(&self.handle(req)).unwrap_or_else(|e| {
@@ -253,7 +257,9 @@ impl Engine {
                 cfg.watch_cap = n.max(16);
             }
             if let Some(n) = req.cache_mb {
-                cfg.cache_bytes = (n.max(16) as u64) * 1024 * 1024;
+                let bytes = (n.max(16) as u64) * 1024 * 1024;
+                cfg.cache_bytes = bytes;
+                self.inner.cache.set_budget(bytes);
             }
             if let Some(n) = req.max_files {
                 cfg.max_files = n.max(1000) as usize;
@@ -328,7 +334,7 @@ impl Engine {
             watch_cap: cfg.watch_cap,
             roots: cfg.roots.iter().map(|p| p.to_string_lossy().into()).collect(),
             cache_bytes: self.inner.cache.bytes_used(),
-            cache_budget: cfg.cache_bytes,
+            cache_budget: self.inner.cache.budget(),
             poppler: self.inner.poppler,
             plocate: self.inner.plocate,
             ffmpeg: self.inner.ffmpeg,
@@ -583,6 +589,16 @@ mod tests {
         let st = resp.status.unwrap();
         assert_eq!(st.helper, "rust");
         assert_eq!(st.version, VERSION);
+    }
+
+    #[test]
+    fn config_updates_live_cache_budget() {
+        let eng = test_engine();
+        assert_eq!(eng.cache_budget(), 8 * 1024 * 1024);
+        let _ = eng.handle(protocol::parse(r#"{"id":4,"cmd":"config","cacheMb":32}"#).unwrap());
+        assert_eq!(eng.cache_budget(), 32 * 1024 * 1024);
+        let st = eng.handle(protocol::parse(r#"{"id":5,"cmd":"status"}"#).unwrap());
+        assert_eq!(st.status.unwrap().cache_budget, 32 * 1024 * 1024);
     }
 
     #[test]

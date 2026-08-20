@@ -1,18 +1,31 @@
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 pub struct PreviewCache {
     pub dir: PathBuf,
-    pub budget: u64,
+    budget: AtomicU64,
 }
 
 impl PreviewCache {
     pub fn new(dir: PathBuf, budget: u64) -> Self {
         let previews = dir.join("previews");
         let _ = fs::create_dir_all(&previews);
-        Self { dir, budget }
+        Self {
+            dir,
+            budget: AtomicU64::new(budget.max(1)),
+        }
+    }
+
+    pub fn budget(&self) -> u64 {
+        self.budget.load(Ordering::SeqCst)
+    }
+
+    pub fn set_budget(&self, bytes: u64) {
+        self.budget.store(bytes.max(1), Ordering::SeqCst);
+        self.gc();
     }
 
     pub fn preview_dir(&self) -> PathBuf {
@@ -56,12 +69,13 @@ impl PreviewCache {
                 files.push((mtime, size, p));
             }
         }
-        if total <= self.budget {
+        let budget = self.budget();
+        if total <= budget {
             return;
         }
         files.sort_by(|a, b| a.0.cmp(&b.0));
         for (_, size, path) in files {
-            if total <= self.budget {
+            if total <= budget {
                 break;
             }
             if fs::remove_file(&path).is_ok() {
@@ -76,7 +90,7 @@ impl PreviewCache {
             fs::create_dir_all(parent)?;
         }
         fs::write(&dest, bytes)?;
-        if self.bytes_used() > self.budget {
+        if self.bytes_used() > self.budget() {
             self.gc();
         }
         Ok(dest)
@@ -124,5 +138,20 @@ mod tests {
         let c = cache.key(&["/tmp/x", "2", "png"]);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn set_budget_evicts_immediately() {
+        let dir = env::temp_dir().join(format!("ql-cache-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let cache = PreviewCache::new(dir.clone(), 200);
+        cache.store_bytes(&["a"], "bin", &[0u8; 80]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        cache.store_bytes(&["b"], "bin", &[1u8; 80]).unwrap();
+        assert!(cache.bytes_used() > 80);
+        cache.set_budget(80);
+        assert_eq!(cache.budget(), 80);
+        assert!(cache.bytes_used() <= 80);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

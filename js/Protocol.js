@@ -60,16 +60,41 @@ function acceptQuery(msg) {
   return true
 }
 
+function slotClass(id) {
+  var n = Number(id) || 0
+  if (n > 0 && inFlightPreview === n)
+    return "preview"
+  if (n > 0 && inFlightPrefetch === n)
+    return "prefetch"
+  return ""
+}
+
+function classifyAndClear(id) {
+  var cls = slotClass(id)
+  clearSlot(id)
+  return cls
+}
+
+function acceptForegroundPreview(msg) {
+  if (!msg)
+    return false
+  if (msg.kind !== "preview")
+    return false
+  if (isStale(lastAcceptedPreviewId, msg.id))
+    return false
+  lastAcceptedPreviewId = Number(msg.id) || 0
+  return true
+}
+
 function acceptPreview(msg) {
   if (!msg)
     return false
   if (msg.kind !== "preview")
     return false
-  clearSlot(msg.id)
-  if (isStale(lastAcceptedPreviewId, msg.id))
+  var cls = classifyAndClear(msg.id)
+  if (cls === "prefetch")
     return false
-  lastAcceptedPreviewId = Number(msg.id) || 0
-  return true
+  return acceptForegroundPreview(msg)
 }
 
 function canStartPreview() {

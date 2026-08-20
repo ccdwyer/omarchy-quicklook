@@ -81,7 +81,10 @@ Item {
   }
 
   readonly property var palette: Theme.paletteFromTokens(background, foreground, accent, background)
-  readonly property string privacyLine: Config.privacySentence(Config.snapshot().roots, Quickshell.env("HOME") || "~")
+  readonly property string privacyLine: {
+    var snap = Config.snapshot()
+    return Config.privacySentence(snap.roots, Quickshell.env("HOME") || "~", snap.cacheMb)
+  }
 
   function open(payloadJson) {
     root.opened = true

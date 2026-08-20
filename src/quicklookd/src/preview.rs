@@ -41,7 +41,7 @@ pub fn render(
         let path = path.to_path_buf();
         let theme = theme.clone();
         let cache_dir = cache.dir.clone();
-        let budget = cache.budget;
+        let budget = cache.budget();
         move || {
             let cache = PreviewCache::new(cache_dir, budget);
             match kind {

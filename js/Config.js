@@ -117,10 +117,13 @@ function loadUi(text) {
   return snapshot()
 }
 
-function privacySentence(roots, home) {
+function privacySentence(roots, home, cacheMb) {
   var r = roots && roots.length ? roots : [home || "~"]
   var shown = r.slice(0, 3).join(", ")
   if (r.length > 3)
     shown += ", +" + (r.length - 3) + " more"
-  return "Indexes " + shown + " (skips .ssh, .gnupg, password-store, keyrings, node_modules, target, .git). Preview cache ≤ 500 MB in ~/.cache/quicklook."
+  var mb = Number(cacheMb)
+  if (isNaN(mb) || mb <= 0)
+    mb = current.cacheMb || defaults.cacheMb
+  return "Indexes " + shown + " (skips .ssh, .gnupg, password-store, keyrings, node_modules, target, .git). Preview cache ≤ " + mb + " MB in ~/.cache/quicklook."
 }

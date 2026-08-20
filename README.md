@@ -16,18 +16,18 @@ omarchy plugin add <git-url> --enable
 
 That is the whole cold path. The installer does not run build hooks. On first summon the overlay is already useful: the five-file demo corpus plus the `compat/` helper (Python 3 when present, POSIX otherwise). No `build.sh` is required to get a working finder.
 
-The full Rust helper (`nucleo` ranking, sqlite frecency, isolated PDF children, 20 MP downsample) is optional:
+The full Rust helper (`nucleo` ranking, sqlite frecency, isolated PDF children, 20 MP downsample) is optional. **This git tree does not and will not contain Linux prebuilts** — the authoring host is macOS, and fake binaries are worse than none.
 
-1. GitHub Actions (`.github/workflows/release-helper.yml`) cross-compiles `quicklookd` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` and publishes checksums on the release. This tree does **not** contain those binaries — it was authored on macOS. After a tagged release:
-
-   ```sh
-   QUICKLOOK_RELEASE_REPO=<owner/repo> ~/.config/omarchy/plugins/io.github.chris.quicklook/scripts/fetch-helper.sh
-   ```
-
-2. Or compile on the Omarchy box:
+1. Source build on the Omarchy box (the supported path when no release assets exist yet):
 
    ```sh
    ~/.config/omarchy/plugins/io.github.chris.quicklook/build.sh
+   ```
+
+2. After a tagged release, `.github/workflows/release.yml` cross-compiles musl `quicklookd` for `x86_64` and `aarch64` and publishes `CHECKSUMS.txt`. Fetch + verify:
+
+   ```sh
+   QUICKLOOK_RELEASE_REPO=<owner/repo> ~/.config/omarchy/plugins/io.github.chris.quicklook/scripts/fetch-helper.sh
    ```
 
 Reload if the shell was already running:
@@ -129,7 +129,11 @@ omarchy-shell shell call io.github.chris.quicklook query invo
 omarchy-shell shell call io.github.chris.quicklook preview /tmp/file.pdf
 ```
 
-The service also registers an `IpcHandler` target of the same id (`qs ipc call io.github.chris.quicklook ping`).
+The service also registers an `IpcHandler` target of the same id:
+
+```sh
+quickshell ipc -p $OMARCHY_PATH/shell call io.github.chris.quicklook ping
+```
 
 Helper protocol (newline-delimited JSON on stdin/stdout, testable without the shell):
 
@@ -145,7 +149,7 @@ bin/quicklookd --oneshot '{"id":1,"cmd":"status"}'
 - **Close is not a renderer for every format.** Markdown, archives, and video playback are v1.1. Hostile PDFs can only take down a `pdftoppm` child, never the shell.
 - **Index cap 500k files**, watch/poll cap 2000 directories, preview cache 500 MB. Huge homes still get a cold path (`plocate` or a bounded walk) plus the demo corpus.
 - **Frecency uses selection history + mtime, never atime** (relatime lies).
-- **Helper binary.** `bin/quicklookd` is not in this git tree. Cold-judge `plugin add --enable` uses `compat/`. The musl builds live on the GitHub release produced by `release-helper.yml`; checksums are on that release (see `CHECKSUMS.txt`). `build.sh` compiles from source on the Omarchy box.
+- **Helper binary.** `bin/quicklookd` is not in this git tree (see `bin/README.md` and `CHECKSUMS.txt`). Cold-judge `plugin add --enable` uses `compat/` (Python when present, POSIX `find` + real `gio open` otherwise). `build.sh` compiles from source. `.github/workflows/release.yml` is how Linux musl binaries and verified hashes are produced — they are not invented on macOS.
 - **Keybinds are yours to add.** First open of the overlay repeats the table and the privacy sentence. The first-run card is persisted in `~/.local/state/quicklook/ui.json`.
 
 ## v1.1 roadmap

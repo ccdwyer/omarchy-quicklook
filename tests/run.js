@@ -122,10 +122,23 @@ test("protocol: prefetch is a separate slot", () => {
   assert.strictEqual(Protocol.canStartPrefetch(), false)
   const f2 = Protocol.prefetchRequest("/other.rs")
   assert.strictEqual(Protocol.queueOrStartPrefetch(f2), null)
-  Protocol.acceptPreview({ id: f.id, kind: "preview", preview: { kind: "code" } })
+  assert.strictEqual(Protocol.slotClass(f.id), "prefetch")
+  assert.strictEqual(Protocol.acceptPreview({ id: f.id, kind: "preview", preview: { kind: "code" } }), false)
   const next = Protocol.takeReadyPrefetch()
   assert.ok(next)
   assert.strictEqual(next.path, "/other.rs")
+  assert.strictEqual(Protocol.slotClass(p.id), "preview")
+})
+
+test("protocol: prefetch completion is not a foreground accept", () => {
+  const sel = Protocol.previewRequest("/selected.csv")
+  assert.ok(Protocol.queueOrStartPreview(sel))
+  const top = Protocol.prefetchRequest("/top.png")
+  assert.ok(Protocol.queueOrStartPrefetch(top))
+  assert.strictEqual(Protocol.slotClass(top.id), "prefetch")
+  assert.strictEqual(Protocol.classifyAndClear(top.id), "prefetch")
+  assert.strictEqual(Protocol.slotClass(top.id), "")
+  assert.strictEqual(Protocol.slotClass(sel.id), "preview")
 })
 
 test("protocol: implicit query request shape", () => {
@@ -181,9 +194,10 @@ test("config: inline shell.json fields, expand ~", () => {
   assert.strictEqual(snap.watchCap, 100)
   assert.strictEqual(snap.cacheMb, 64)
   assert.ok(snap.extraExclude.indexOf("Secrets") >= 0)
-  const line = Config.privacySentence(snap.roots, "/home/chris")
+  const line = Config.privacySentence(snap.roots, "/home/chris", snap.cacheMb)
   assert.ok(line.indexOf("Documents") >= 0)
-  assert.ok(line.indexOf("500 MB") >= 0)
+  assert.ok(line.indexOf("64 MB") >= 0)
+  assert.ok(line.indexOf("500 MB") < 0)
 })
 
 test("fallback: empty query is demo corpus", () => {
@@ -273,6 +287,12 @@ test("format: local preview never hands a raw pdf to Image", () => {
   assert.ok(!pdf.path)
   assert.strictEqual(Format.isRasterPath("/cache/page.png"), true)
   assert.strictEqual(Format.isRasterPath("/docs/invoice.pdf"), false)
+})
+
+test("compat python does not invoke pdftoppm", () => {
+  const src = fs.readFileSync(path.join(ROOT, "compat/quicklookd.py"), "utf8")
+  assert.ok(src.indexOf("compat mode does not rasterize") >= 0)
+  assert.ok(!/subprocess\.run\(\s*\[\s*[\"']pdftoppm/.test(src))
 })
 
 test("manifest: id, kinds, entryPoints", () => {

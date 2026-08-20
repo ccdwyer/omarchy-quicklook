@@ -8,8 +8,12 @@ target/
 .impl_prompt.md
 .grok_impl.log
 .fix_prompt_r1.md
+.fix_prompt_r2.md
 .review_prompt.md
+.review_prompt2.md
 .gpt_review_r1.md
+.gpt_review_r2.md
 .gpt_review_err.log
+.gpt_review_err2.log
 .code-review-graph/
 .serena/

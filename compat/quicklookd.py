@@ -180,17 +180,30 @@ def find_names(q: str, limit: int) -> list[dict]:
     if not roots:
         roots = [str(HOME)]
     cap = min(int(limit), 40)
+    q = "".join(ch for ch in q if ch.isalnum() or ch in "._-")
+    if not q:
+        return []
     out: list[dict] = []
+    skip = skip_parts()
+    prune: list[str] = []
+    for name in skip:
+        if prune:
+            prune.append("-o")
+        prune.extend(["-name", name])
+    cmd = ["find"]
+    cmd.extend(roots)
+    if prune:
+        cmd.extend(["(", *prune, ")", "-prune", "-o"])
+    cmd.extend(["-iname", f"*{q}*", "-print"])
     try:
         proc = subprocess.run(
-            ["find", *roots, "-maxdepth", "6", "-iname", f"*{q}*", "-print"],
+            cmd,
             capture_output=True,
             text=True,
             timeout=2,
         )
     except (subprocess.TimeoutExpired, OSError):
         return out
-    skip = skip_parts()
     for line in proc.stdout.splitlines():
         if any(f"/{s}/" in line or line.endswith("/" + s) for s in skip):
             continue
@@ -256,28 +269,22 @@ def preview(path_s: str, page: int = 1) -> dict:
         body = rows[1:501] if rows else []
         return {"kind": "csv", "headers": headers, "rows": body, "truncated": len(text.splitlines()) > 501}
     if k == "pdf":
-        if not shutil.which("pdftoppm"):
-            return {"kind": "pdf", "need_poppler": True, "page": page, "page_count": 1,
-                    "label": "install poppler for PDF previews", "magic": "PDF document"}
-        CACHE.mkdir(parents=True, exist_ok=True)
-        dest_prefix = CACHE / "compat-pdf"
-        try:
-            subprocess.run(
-                ["pdftoppm", "-f", str(page), "-l", str(page), "-png", "-r", "120",
-                 "-singlefile", str(path), str(dest_prefix)],
-                timeout=8,
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            return {"kind": "pdf", "label": "couldn't render this page", "need_poppler": False,
-                    "render_error": True}
-        png = Path(str(dest_prefix) + ".png")
-        if png.is_file():
-            return {"kind": "pdf", "path": str(png), "page": page, "page_count": 1, "need_poppler": False}
-        return {"kind": "pdf", "label": "couldn't render this page", "need_poppler": False,
-                "render_error": True}
+        # Compat never runs pdftoppm: no rlimits here, and a shared raster
+        # would stale across files. Isolated PDF children stay in quicklookd.
+        has_poppler = shutil.which("pdftoppm") is not None
+        return {
+            "kind": "pdf",
+            "need_poppler": not has_poppler,
+            "render_error": has_poppler,
+            "page": page,
+            "page_count": 1,
+            "label": (
+                "install poppler for PDF previews"
+                if not has_poppler
+                else "compat mode does not rasterize PDFs — Enter opens the file"
+            ),
+            "magic": "PDF document",
+        }
     head = path.read_bytes()[:256]
     hex_lines = []
     for i in range(0, len(head), 16):

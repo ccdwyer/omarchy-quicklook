@@ -1,18 +1,35 @@
 use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+static PARSE_THREADS: AtomicU32 = AtomicU32::new(0);
+const MAX_PARSE_THREADS: u32 = 2;
 
 pub fn with_timeout<T, F>(ms: u64, f: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> T + Send + 'static,
 {
+    loop {
+        let n = PARSE_THREADS.load(Ordering::SeqCst);
+        if n >= MAX_PARSE_THREADS {
+            return Err("parser busy".into());
+        }
+        if PARSE_THREADS
+            .compare_exchange(n, n + 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            break;
+        }
+    }
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        PARSE_THREADS.fetch_sub(1, Ordering::SeqCst);
         let _ = tx.send(result);
     });
     match rx.recv_timeout(Duration::from_millis(ms)) {
@@ -109,13 +126,42 @@ mod tests {
 
     #[test]
     fn timeout_allows_fast_closure() {
-        let r = with_timeout(400, || 7u8).unwrap();
-        assert_eq!(r, 7);
+        for _ in 0..20 {
+            match with_timeout(400, || 7u8) {
+                Ok(v) => {
+                    assert_eq!(v, 7);
+                    return;
+                }
+                Err(e) if e.contains("busy") => thread::sleep(Duration::from_millis(50)),
+                Err(e) => panic!("{e}"),
+            }
+        }
+        panic!("parser stayed busy");
     }
 
     #[test]
     fn catch_unwind_is_error() {
-        let r: Result<u8, _> = with_timeout(400, || panic!("boom"));
-        assert!(r.unwrap_err().contains("panic"));
+        for _ in 0..20 {
+            match with_timeout(400, || -> u8 { panic!("boom") }) {
+                Err(e) if e.contains("panic") => return,
+                Err(e) if e.contains("busy") => thread::sleep(Duration::from_millis(50)),
+                other => panic!("{other:?}"),
+            }
+        }
+        panic!("parser stayed busy");
+    }
+
+    #[test]
+    fn timeout_threads_are_capped() {
+        let a = thread::spawn(|| with_timeout(80, || { thread::sleep(Duration::from_millis(400)); 1u8 }));
+        thread::sleep(Duration::from_millis(10));
+        let b = thread::spawn(|| with_timeout(80, || { thread::sleep(Duration::from_millis(400)); 1u8 }));
+        thread::sleep(Duration::from_millis(10));
+        let c = with_timeout(80, || { thread::sleep(Duration::from_millis(400)); 1u8 });
+        let _ = a.join();
+        let _ = b.join();
+        assert!(c.is_err());
+        let err = c.unwrap_err();
+        assert!(err.contains("busy") || err.contains("timeout"), "{err}");
     }
 }

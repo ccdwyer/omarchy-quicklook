@@ -183,12 +183,15 @@ Item {
         root.backend = String(msg.backend)
       root.resultsRevision += 1
     } else if (msg.kind === "preview") {
+      var cls = Protocol.slotClass(msg.id)
       var inflightPath = Protocol.pathForInFlight(msg.id)
-      var accepted = Protocol.acceptPreview(msg)
+      Protocol.classifyAndClear(msg.id)
       root.dispatchPending()
-      if (!accepted)
+      if (cls === "prefetch")
         return
       if (msg.error === "stale" && !msg.preview)
+        return
+      if (!Protocol.acceptForegroundPreview(msg))
         return
       root.lastPreview = msg.preview || Format.localPreview(inflightPath)
       root.previewRevision += 1
@@ -209,10 +212,10 @@ Item {
       root.statusRevision += 1
     } else if (msg.kind === "error") {
       var errPath = Protocol.pathForInFlight(msg.id)
-      var wasPreview = Protocol.isInFlight(msg.id)
+      var errClass = Protocol.slotClass(msg.id)
       Protocol.dropInFlight(msg.id)
       root.lastStatus = "error:" + String(msg.error || "")
-      if (wasPreview)
+      if (errClass === "preview")
         root.applyLocalPreview(msg.id, errPath)
       else
         root.dispatchPending()
@@ -398,7 +401,10 @@ Item {
         root.onHelperLine(String(text).trim().split("\n").pop())
       } else if (job && job.cmd === "query") {
         root.localQuery(job.q || "")
-      } else if (job && (job.cmd === "preview" || job.cmd === "prefetch" || job.cmd === "page")) {
+      } else if (job && job.cmd === "prefetch") {
+        Protocol.dropInFlight(job.id)
+        root.dispatchPending()
+      } else if (job && (job.cmd === "preview" || job.cmd === "page")) {
         root.applyLocalPreview(job.id, job.path)
       }
       root.runOneshot()
