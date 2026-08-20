@@ -10,7 +10,7 @@ Conservative choices where the Omarchy / Quickshell / Hyprland API was not 100% 
 - **Settings are inline on the `shell.json` plugins[] entry.** Service declares `roots`, `watchCap`, `cacheMb`, `maxFiles`, `extraExclude` only. The host copies those fields onto the Item; they flow to the helper via a `config` command *before* indexing starts. There is no nested `pluginSettings` object and no plugin-owned settings file. Runtime UI state (`firstRunShown`) is `~/.local/state/quicklook/ui.json`, not a settings file.
 - **Service owns the only helper.** Overlay never launches `quicklookd`. It talks to the warm service over documented `omarchy-shell shell call <id> <method> <arg>` (`query` / `preview` / `prefetch` / `snapshot` / …). There is no `pluginRegistry.serviceFor` or in-process `shell.summon`. Persistent and one-shot helper launches pass `--plugin-dir <pluginDir>` so the demo corpus is not resolved from the shell cwd.
 - **IPC verb** is `omarchy-shell shell call <id> <method> <arg>` and `shell summon <id> <payloadJson>`. Every `IpcHandler` method takes the required string argument (empty when unused). README examples always pass `<arg>`. We do not write `hyprland.conf`.
-- **`IpcHandler` target** is the plugin id. Overlay polls `snapshot` and sends commands through that channel.
+- **Two distinct IPC surfaces.** (1) `omarchy-shell shell call <id> <method> <arg>` invokes the method **on the loaded entry-point root** — so every callable verb (`status`, `query`, `preview`, `snapshot`, `theme`, `open`, `reveal`, `prefetch`, `warmup`) is a **root-level** string-in/string-out adapter that parses its own JSON argument (`preview` accepts a bare path or `{"path":…,"page":N}`). (2) A separate `IpcHandler { target: <id> }` exposes the same verbs for direct `quickshell ipc call` use; its typed methods just delegate to the root adapters. The two are not conflated: the overlay's `snapshot` poll and commands go over `shell call` (surface 1).
 
 ## Quickshell
 
@@ -40,7 +40,21 @@ Conservative choices where the Omarchy / Quickshell / Hyprland API was not 100% 
 
 ### External processes (every untrusted-file spawn is killable)
 
-Rust helper (`run_limited` = wall-clock kill + rlimits):
+Every subprocess that touches an untrusted file runs in **its own process group**
+and is bounded three ways: a wall-clock deadline that TERMs then KILLs the whole
+group (descendants included, so a TERM-ignoring child cannot outlive it), a hard
+**96 KiB cap** on captured stdout/stderr that is drained concurrently (so a
+flooding child can neither exhaust memory nor deadlock on a full pipe), and CPU /
+file-size rlimits. `RLIMIT_NPROC` is deliberately **not** set: it counts the real
+user's entire existing process table, so any absolute cap makes fork /
+`pthread_create` fail on a normally-busy machine (it would break threaded tools
+like `pdftoppm`); fork bombs are bounded by `RLIMIT_CPU` + the group kill instead.
+`RLIMIT_AS` is applied on Linux only (unreliable on macOS/Darwin, where it breaks
+exec). If the process-group guarantee cannot be established (`setsid` fails, or no
+`setsid`/GNU-`timeout` in the POSIX fallback), the path-consuming feature is
+**disabled / metadata-only** rather than run unbounded.
+
+Rust helper (`run_limited` = process-group + wall-clock group kill + capped drain + rlimits):
 
 | Binary | When | Bound |
 |---|---|---|

@@ -128,13 +128,24 @@ omarchy-shell shell summon io.github.chris.quicklook '{"path":"/tmp/file.pdf"}'
 omarchy-shell shell hide io.github.chris.quicklook
 omarchy-shell shell call io.github.chris.quicklook status ''
 omarchy-shell shell call io.github.chris.quicklook query invo
-omarchy-shell shell call io.github.chris.quicklook preview /tmp/file.pdf
+omarchy-shell shell call io.github.chris.quicklook preview '{"path":"/tmp/file.pdf","page":1}'
+omarchy-shell shell call io.github.chris.quicklook snapshot ''
+omarchy-shell shell call io.github.chris.quicklook theme '{"bg":"#1e1e2e","fg":"#cdd6f4","accent":"#89b4fa"}'
 ```
 
-The service also registers an `IpcHandler` target of the same id:
+`shell call <id> <method> <arg>` invokes the named method on the loaded plugin
+entry point; every callable verb (`status`, `query`, `preview`, `snapshot`,
+`theme`, `open`, `reveal`, `prefetch`, `warmup`) is a root-level string-in /
+string-out adapter that parses its own JSON argument. `preview` takes either a
+bare path or a `{"path":…,"page":N}` object.
+
+Separately, the service also registers a direct `IpcHandler` target of the same
+id — a distinct surface addressed with `quickshell ipc` (not `omarchy-shell
+shell call`). Each of its typed methods takes one string argument:
 
 ```sh
-quickshell ipc -p $OMARCHY_PATH/shell call io.github.chris.quicklook ping
+quickshell ipc -p "$OMARCHY_PATH/shell" call io.github.chris.quicklook ping ''
+quickshell ipc -p "$OMARCHY_PATH/shell" call io.github.chris.quicklook preview '{"path":"/tmp/file.pdf"}'
 ```
 
 Helper protocol (newline-delimited JSON on stdin/stdout, testable without the shell):

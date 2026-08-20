@@ -1,11 +1,17 @@
 use std::io;
+use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Hard cap on captured stdout/stderr from any child subprocess. Excess is
+/// drained and discarded so a flooding child can neither exhaust memory nor
+/// deadlock on a full pipe.
+pub const OUTPUT_CAP: usize = 96 * 1024;
 
 static PARSE_THREADS: AtomicU32 = AtomicU32::new(0);
 static LIVE_THREADS: AtomicU32 = AtomicU32::new(0);
@@ -58,25 +64,113 @@ where
     }
 }
 
+/// Read `src` to EOF, retaining at most `OUTPUT_CAP` bytes and discarding the
+/// rest. Keeps draining after the cap so the writer never blocks on a full pipe.
+fn spawn_capped_reader<R: Read + Send + 'static>(mut src: R) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut kept: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            match src.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if kept.len() < OUTPUT_CAP {
+                        let room = OUTPUT_CAP - kept.len();
+                        kept.extend_from_slice(&chunk[..n.min(room)]);
+                    }
+                    // Bytes beyond the cap are read and dropped so the child's
+                    // write() never blocks on a full pipe buffer.
+                }
+                Err(_) => break,
+            }
+        }
+        kept
+    })
+}
+
+#[cfg(unix)]
+fn signal_group(pid: u32, sig: libc::c_int) {
+    // Child is its own process-group leader (pgid == pid) via process_group(0),
+    // so a negative pid signals the whole group, reaping descendants too.
+    unsafe {
+        libc::kill(-(pid as i32), sig);
+    }
+}
+#[cfg(not(unix))]
+fn signal_group(_pid: u32, _sig: i32) {}
+
+/// Spawn `cmd` in its own process group, drain its output under a hard cap, and
+/// enforce a wall-clock timeout with a group TERM-then-KILL so no descendant
+/// outlives the deadline. Never buffers more than `OUTPUT_CAP` of output.
 pub fn run_limited(mut cmd: Command, timeout: Duration, mem_bytes: u64, cpu_secs: u64) -> io::Result<Output> {
     apply_rlimits(&mut cmd, mem_bytes, cpu_secs);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // New process group with pgid == child pid; lets us kill the whole tree.
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn()?;
+    let pid = child.id();
+    let out_h = child.stdout.take().map(spawn_capped_reader);
+    let err_h = child.stderr.take().map(spawn_capped_reader);
+
+    let collect = |h: Option<thread::JoinHandle<Vec<u8>>>| -> Vec<u8> {
+        h.map(|j| j.join().unwrap_or_default()).unwrap_or_default()
+    };
+
     let start = Instant::now();
     loop {
         match child.try_wait()? {
-            Some(_) => return child.wait_with_output(),
+            Some(status) => {
+                // Reap any descendants the child left behind (best-effort).
+                signal_group(pid, libc_sigterm());
+                let stdout = collect(out_h);
+                let stderr = collect(err_h);
+                return Ok(build_output(status, stdout, stderr));
+            }
             None => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
+                    signal_group(pid, libc_sigterm());
+                    thread::sleep(Duration::from_millis(50));
+                    signal_group(pid, libc_sigkill());
                     let _ = child.wait();
+                    // Join drains so reader threads exit (pipes are closed now).
+                    let _ = collect(out_h);
+                    let _ = collect(err_h);
                     return Err(io::Error::new(io::ErrorKind::TimedOut, "killed"));
                 }
                 thread::sleep(Duration::from_millis(20));
             }
         }
+    }
+}
+
+#[cfg(unix)]
+fn libc_sigterm() -> libc::c_int {
+    libc::SIGTERM
+}
+#[cfg(unix)]
+fn libc_sigkill() -> libc::c_int {
+    libc::SIGKILL
+}
+#[cfg(not(unix))]
+fn libc_sigterm() -> i32 {
+    15
+}
+#[cfg(not(unix))]
+fn libc_sigkill() -> i32 {
+    9
+}
+
+fn build_output(status: ExitStatus, stdout: Vec<u8>, stderr: Vec<u8>) -> Output {
+    Output {
+        status,
+        stdout,
+        stderr,
     }
 }
 
@@ -98,13 +192,12 @@ fn apply_rlimits(cmd: &mut Command, mem_bytes: u64, cpu_secs: u64) {
                     rlim_max: cpu,
                 };
                 libc::setrlimit(libc::RLIMIT_CPU, &cpu_lim);
-                let nproc = libc::rlimit {
-                    rlim_cur: 32,
-                    rlim_max: 32,
-                };
-                #[cfg(any(target_os = "linux", target_os = "android"))]
-                libc::setrlimit(libc::RLIMIT_NPROC, &nproc);
-                let _ = nproc;
+                // RLIMIT_NPROC is intentionally NOT set: it counts the real
+                // user's entire existing process table, so any absolute cap
+                // makes fork/pthread_create fail (EAGAIN) for a normally-busy
+                // user — which would break threaded tools like pdftoppm. Fork
+                // bombs are bounded by RLIMIT_CPU plus the wall-clock group
+                // TERM-then-KILL in run_limited.
                 Ok(())
             });
         }
@@ -161,6 +254,62 @@ mod tests {
             "run_limited did not kill hung child: {elapsed:?}"
         );
         assert!(r.is_err() || !r.unwrap().status.success());
+    }
+
+    #[test]
+    fn run_limited_returns_small_output() {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("printf hello");
+        let out = run_limited(cmd, Duration::from_millis(2000), 128 * 1024 * 1024, 2).unwrap();
+        assert_eq!(out.stdout, b"hello");
+    }
+
+    #[test]
+    fn run_limited_bounds_flooding_output() {
+        // `yes` floods stdout forever. The old wait_with_output path would buffer
+        // it unboundedly (OOM) or block on the full pipe; the capped drain must
+        // keep memory bounded and the timeout must still fire promptly.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("yes ABCDEFGHIJKLMNOP");
+        let start = Instant::now();
+        let r = run_limited(cmd, Duration::from_millis(300), 512 * 1024 * 1024, 4);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "flooding output was not bounded/killed in time: {:?}",
+            start.elapsed()
+        );
+        assert!(r.is_err(), "flooding child should hit the timeout");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_limited_kills_term_ignoring_descendant() {
+        // Parent ignores TERM and spawns a TERM-ignoring descendant that writes
+        // its pid to a marker file, then both sleep well past the timeout. After
+        // run_limited returns, a group SIGKILL must have reaped the descendant.
+        let marker = std::env::temp_dir().join(format!("ql_desc_{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!(
+            "trap '' TERM; ( trap '' TERM; echo $$ > '{m}'; sleep 30 ) & sleep 30",
+            m = marker.display()
+        );
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(&script);
+        let start = Instant::now();
+        let r = run_limited(cmd, Duration::from_millis(400), 128 * 1024 * 1024, 4);
+        assert!(r.is_err());
+        assert!(start.elapsed() < Duration::from_secs(3));
+        // Give the group KILL a moment to take effect, then confirm the
+        // descendant pid recorded in the marker is gone.
+        thread::sleep(Duration::from_millis(200));
+        if let Ok(txt) = std::fs::read_to_string(&marker) {
+            if let Ok(desc) = txt.trim().parse::<i32>() {
+                // kill(pid, 0) returns -1/ESRCH when the process no longer exists.
+                let alive = unsafe { libc::kill(desc, 0) } == 0;
+                assert!(!alive, "TERM-ignoring descendant {desc} survived group kill");
+            }
+        }
+        let _ = std::fs::remove_file(&marker);
     }
 
     #[test]

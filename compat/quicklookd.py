@@ -12,7 +12,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
+
+# Hard cap on captured stdout/stderr from any child subprocess. Excess bytes are
+# drained and dropped so a flooding child can neither exhaust memory nor block on
+# a full pipe.
+OUTPUT_CAP = 96 * 1024
 
 def _argv_value(flag: str) -> str | None:
     argv = sys.argv
@@ -364,12 +370,21 @@ def _limit_child() -> None:
         import resource
     except ImportError:
         return
-    for name, soft in (
+    limits = [
         ("RLIMIT_CPU", 8),
-        ("RLIMIT_AS", 512 * 1024 * 1024),
-        ("RLIMIT_NPROC", 8),
         ("RLIMIT_FSIZE", 32 * 1024 * 1024),
-    ):
+    ]
+    # NOTE: RLIMIT_NPROC is deliberately NOT set. It counts the real user's
+    # entire existing process table, so any absolute cap makes exec/fork fail on
+    # a normally-busy machine. Fork bombs are instead bounded by the wall-clock
+    # group TERM-then-KILL in run_killable plus RLIMIT_CPU.
+    #
+    # RLIMIT_AS is honored on Linux but unreliable on macOS/Darwin, where the
+    # dynamic linker reserves a huge virtual-address range and a 512 MiB cap
+    # makes exec fail outright. Cap address space only where it behaves.
+    if not sys.platform.startswith("darwin"):
+        limits.insert(1, ("RLIMIT_AS", 512 * 1024 * 1024))
+    for name, soft in limits:
         lim = getattr(resource, name, None)
         if lim is None:
             continue
@@ -406,6 +421,29 @@ def _kill_group(proc: subprocess.Popen, pgid: int | None = None) -> None:
         pass
 
 
+def _drain_capped(stream, sink: dict, key: str) -> None:
+    """Read `stream` to EOF, keeping at most OUTPUT_CAP bytes in sink[key] and
+    discarding the rest so the writer never blocks on a full pipe."""
+    kept = bytearray()
+    try:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                break
+            if len(kept) < OUTPUT_CAP:
+                room = OUTPUT_CAP - len(kept)
+                kept.extend(chunk[:room])
+            # bytes past the cap are read and dropped
+    except OSError:
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+    sink[key] = bytes(kept)
+
+
 def run_killable(
     argv: list[str],
     timeout_s: float = 8,
@@ -413,17 +451,25 @@ def run_killable(
     text: bool = False,
     limits: bool = True,
 ) -> subprocess.CompletedProcess:
-    """Spawn in a new session and kill the whole process group on timeout."""
+    """Spawn in a new session and kill the whole process group on timeout.
+
+    Output is drained concurrently under a hard OUTPUT_CAP so a flooding child
+    cannot exhaust memory or deadlock on a full pipe. When `limits` is set, the
+    child MUST become its own session leader; if setsid() fails the child exits
+    without exec-ing, so we never run untrusted code without a group guarantee.
+    """
     stdout = subprocess.PIPE if capture_output else subprocess.DEVNULL
     stderr = subprocess.PIPE if capture_output else subprocess.DEVNULL
-    # New session so timeout can kill the whole group. Cannot combine
-    # start_new_session with preexec_fn; setsid in preexec when limits apply.
+
     if limits:
         def preexec() -> None:
             try:
                 os.setsid()
             except OSError:
-                pass
+                # Cannot establish the process-group guarantee — do NOT exec the
+                # untrusted command. Exit so the parent sees a failed run and
+                # skips the path-consuming feature rather than running unbounded.
+                os._exit(127)
             _limit_child()
 
         extra = {"preexec_fn": preexec}
@@ -437,19 +483,38 @@ def run_killable(
         **extra,
     )
     pgid = proc.pid
+
+    sink: dict = {}
+    drains: list[threading.Thread] = []
+    if capture_output:
+        if proc.stdout is not None:
+            t = threading.Thread(target=_drain_capped, args=(proc.stdout, sink, "out"), daemon=True)
+            t.start()
+            drains.append(t)
+        if proc.stderr is not None:
+            t = threading.Thread(target=_drain_capped, args=(proc.stderr, sink, "err"), daemon=True)
+            t.start()
+            drains.append(t)
+
+    timed_out = False
     try:
-        out, err = proc.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
+        proc.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        timed_out = True
         _kill_group(proc, pgid)
-        try:
-            out, err = proc.communicate(timeout=2)
-        except (subprocess.TimeoutExpired, OSError):
-            out, err = exc.output or b"", exc.stderr or b""
-        raise subprocess.TimeoutExpired(argv, timeout_s, output=out, stderr=err) from None
+
+    for t in drains:
+        t.join(timeout=2)
+
+    out = sink.get("out", b"")
+    err = sink.get("err", b"")
     if text:
         enc = sys.getdefaultencoding()
         out = out.decode(enc, errors="replace") if isinstance(out, (bytes, bytearray)) else (out or "")
         err = err.decode(enc, errors="replace") if isinstance(err, (bytes, bytearray)) else (err or "")
+
+    if timed_out:
+        raise subprocess.TimeoutExpired(argv, timeout_s, output=out, stderr=err)
     return subprocess.CompletedProcess(argv, proc.returncode, out, err)
 
 

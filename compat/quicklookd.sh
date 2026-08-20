@@ -22,6 +22,17 @@ HAVE_SETSID=0
 SETSID_PY=0
 
 init_watchdog() {
+  # Test hook: force the portable setsid watchdog even when GNU timeout exists,
+  # so the portable process-group path is exercised in CI on every host.
+  if [ "${QUICKLOOK_FORCE_PORTABLE:-}" = "1" ]; then
+    TIMEOUT_STYLE=""
+    if command -v setsid >/dev/null 2>&1; then
+      HAVE_SETSID=1
+    elif command -v python3 >/dev/null 2>&1; then
+      SETSID_PY=1
+    fi
+    return
+  fi
   if command -v timeout >/dev/null 2>&1; then
     if timeout --kill-after=1s 1s true >/dev/null 2>&1; then
       TIMEOUT_BIN=timeout
@@ -109,6 +120,22 @@ run_watchdog() {
       portable_watchdog "$secs" "$@"
       ;;
   esac
+}
+
+# Hard cap on captured subprocess output / user-file reads (96 KiB). Excess is
+# dropped; `head -c` closing the pipe also sends SIGPIPE upstream so a flooding
+# producer (find/locate) stops early instead of filling a temp file unbounded.
+OUTPUT_CAP=98304
+cap_stream() { head -c "$OUTPUT_CAP"; }
+
+# Run a command under the watchdog with its output bounded to OUTPUT_CAP bytes.
+# Usage: run_watchdog_capped <secs> <outfile> -- cmd args...
+run_watchdog_capped() {
+  _secs=$1
+  _out=$2
+  shift 2
+  [ "$1" = "--" ] && shift
+  run_watchdog "$_secs" "$@" 2>/dev/null | cap_stream > "$_out" || true
 }
 
 HOME_DIR=${HOME:-/tmp}
@@ -392,7 +419,7 @@ run_capped_find() {
   IFS=$oldifs
   set -- "$@" ')' -prune -o -iname "*$q*" -print
   set +f
-  run_watchdog 2 "$@" > "$out" 2>/dev/null || true
+  run_watchdog_capped 2 "$out" -- "$@"
 }
 
 find_hits() {
@@ -402,9 +429,9 @@ find_hits() {
   raw=$(mktemp)
   located=$(mktemp)
   if command -v plocate >/dev/null 2>&1; then
-    run_watchdog 2 plocate -il 40 -- "$q" > "$located" 2>/dev/null || true
+    run_watchdog_capped 2 "$located" -- plocate -il 40 -- "$q"
   elif command -v locate >/dev/null 2>&1; then
-    run_watchdog 2 locate -il 40 -- "$q" > "$located" 2>/dev/null || true
+    run_watchdog_capped 2 "$located" -- locate -il 40 -- "$q"
   fi
   if [ -s "$located" ]; then
     while IFS= read -r lp; do
@@ -553,12 +580,13 @@ hex_head() {
 }
 
 html_escape_file() {
-  read_user_file head -c 204800 "$1" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+  read_user_file head -c "$OUTPUT_CAP" "$1" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
 }
 
 csv_preview_json() {
   path="$1"
-  read_user_file head -n 501 "$path" 2>/dev/null | awk '
+  # Byte-cap FIRST (bounds a pathological single no-newline row), then line-cap.
+  read_user_file head -c "$OUTPUT_CAP" "$path" 2>/dev/null | head -n 501 | awk '
     function esc(s) {
       gsub(/\\/, "\\\\", s)
       gsub(/"/, "\\\"", s)
@@ -606,7 +634,8 @@ csv_preview_json() {
 dir_preview_json() {
   path="$1"
   tmp=$(mktemp)
-  read_user_file ls -1 "$path" 2>/dev/null | head -n 200 > "$tmp"
+  # Byte-cap the listing (bounds pathological huge-filename dirs) then line-cap.
+  read_user_file ls -1 "$path" 2>/dev/null | cap_stream | head -n 200 > "$tmp"
   entries=""
   while IFS= read -r name || [ -n "$name" ]; do
     [ -n "$name" ] || continue

@@ -396,8 +396,14 @@ test("TERM-ignoring fallback children are reaped by KILL", () => {
     process.stderr.write(r.stderr || "")
   }
   assert.strictEqual(r.status, 0)
-  assert.ok((r.stdout || "").indexOf("posix watchdog KILL") >= 0)
+  // Both shell backends (host-default and forced-portable) and the Python
+  // production branch must reap TERM-ignoring descendants, and flooding output
+  // must stay bounded.
+  assert.ok((r.stdout || "").indexOf("shell watchdog (host-default) KILL") >= 0)
+  assert.ok((r.stdout || "").indexOf("shell watchdog (forced-portable) KILL") >= 0)
   assert.ok((r.stdout || "").indexOf("python process-group KILL") >= 0)
+  assert.ok((r.stdout || "").indexOf("[limits=production]") >= 0)
+  assert.ok((r.stdout || "").indexOf("flooding output bounded") >= 0)
 })
 
 test("manifest: id, kinds, entryPoints", () => {

@@ -284,7 +284,7 @@ Item {
     return req.id
   }
 
-  function preview(path, page) {
+  function requestPreview(path, page) {
     var req = Protocol.previewRequest(path, page)
     var ready = Protocol.queueOrStartPreview(req)
     if (ready)
@@ -379,7 +379,11 @@ Item {
     })
   }
 
-  function previewArg(arg) {
+  // Root-level string-in/string-out adapters for `omarchy-shell shell call
+  // <id> <method> <arg>`. The host invokes these method NAMES on the loaded
+  // entry point, so every shell-callable verb must exist here (not only on the
+  // direct-target IpcHandler below). Each parses its own JSON argument.
+  function preview(arg) {
     var path = String(arg || "")
     var page = 1
     if (path.length && path.charAt(0) === "{") {
@@ -389,20 +393,24 @@ Item {
         page = Number(o.page) || 1
       } catch (e) {}
     }
-    return String(root.preview(path, page))
+    return String(root.requestPreview(path, page))
   }
 
-  function themeArg(arg) {
+  function theme(arg) {
     try {
       root.setTheme(JSON.parse(arg || "{}"))
     } catch (e) {}
     return "ok"
   }
 
+  function snapshot(arg) {
+    return root.snapshotJson()
+  }
+
   function ping() { return "ok" }
   function status() { return root.statusJson() }
   function open(path) { return String(root.openPath(path)) }
-  function previewPath(path) { return String(root.preview(path, 1)) }
+  function previewPath(path) { return String(root.requestPreview(path, 1)) }
   function search(q) { return String(root.query(q)) }
 
   function startHelper() {
@@ -536,11 +544,11 @@ Item {
     function status(arg: string): string { return root.statusJson() }
     function snapshot(arg: string): string { return root.snapshotJson() }
     function query(q: string): string { return String(root.query(q)) }
-    function preview(path: string): string { return root.previewArg(path) }
+    function preview(path: string): string { return root.preview(path) }
     function prefetch(path: string): string { return String(root.prefetch(path)) }
     function open(path: string): string { return String(root.openPath(path)) }
     function reveal(path: string): string { return String(root.reveal(path)) }
-    function theme(json: string): string { return root.themeArg(json) }
+    function theme(json: string): string { return root.theme(json) }
     function warmup(arg: string): string { root.warmup(); return "ok" }
     function summon(arg: string): string { return root.summonOverlay(arg && arg.length ? arg : "{}") }
     function hide(arg: string): string { return root.hideOverlay() }
