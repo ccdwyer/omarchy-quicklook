@@ -30,7 +30,7 @@ Item {
   property string queryText: ""
   property int selectedIndex: 0
   property var results: []
-  property var preview: ({})
+  property var previewResult: ({})
   property bool previewLoading: false
   property string emptyReason: ""
   property string emptyDetail: ""
@@ -151,8 +151,44 @@ Item {
       root.open("{}")
   }
 
+  // `shell call <id>` hits this overlay, not the service IpcHandler.
+  // Forward service verbs in-process when the host injected serviceFor,
+  // otherwise `omarchy-shell io.github.chris.quicklook <method> <arg>`.
+  function serviceRef() {
+    try {
+      if (root.pluginRegistry && typeof root.pluginRegistry.serviceFor === "function") {
+        var a = root.pluginRegistry.serviceFor(root.pluginId)
+        if (a)
+          return a
+      }
+    } catch (e) {}
+    try {
+      if (root.shell && typeof root.shell.serviceFor === "function") {
+        var b = root.shell.serviceFor(root.pluginId)
+        if (b)
+          return b
+      }
+    } catch (e2) {}
+    return null
+  }
+
+  function query(arg) { return root.callIpc("query", arg) }
+  function snapshot(arg) { return root.callIpc("snapshot", arg) }
+  function status(arg) { return root.callIpc("status", arg) }
+  function theme(arg) { return root.callIpc("theme", arg) }
+  function prefetch(arg) { return root.callIpc("prefetch", arg) }
+  function warmup(arg) { return root.callIpc("warmup", arg) }
+  function preview(arg) { return root.callIpc("preview", arg) }
+
   function callIpc(method, arg) {
     var job = { method: String(method || ""), arg: arg === undefined || arg === null ? "" : String(arg) }
+    var svc = root.serviceRef()
+    if (svc && svc !== root && typeof svc[job.method] === "function") {
+      var result = svc[job.method](job.arg)
+      if (job.method === "snapshot")
+        root.applySnapshot(result)
+      return result === undefined || result === null ? "ok" : String(result)
+    }
     if (job.method === "snapshot") {
       var kept = []
       for (var i = 0; i < root.ipcQueue.length; i++) {
@@ -188,7 +224,7 @@ Item {
       rest.push(snap)
     root.ipcQueue = rest
     root.ipcCurrent = next
-    ipcProc.command = ["omarchy-shell", "shell", "call", root.pluginId, next.method, next.arg]
+    ipcProc.command = ["omarchy-shell", root.pluginId, next.method, next.arg]
     ipcProc.running = true
   }
 
@@ -234,10 +270,10 @@ Item {
     }
     if (snap.previewRevision !== root.lastPreviewRev) {
       root.lastPreviewRev = Number(snap.previewRevision) || 0
-      root.preview = snap.preview || {}
+      root.previewResult = snap.preview || {}
       root.previewLoading = false
-      if (root.preview && root.preview.page)
-        root.pdfPage = Number(root.preview.page) || 1
+      if (root.previewResult && root.previewResult.page)
+        root.pdfPage = Number(root.previewResult.page) || 1
     }
   }
 
@@ -273,7 +309,7 @@ Item {
       n = 0
     if (n >= root.results.length)
       n = root.results.length - 1
-    if (n === root.selectedIndex && root.preview && root.preview.path)
+    if (n === root.selectedIndex && root.previewResult && root.previewResult.path)
       return
     root.selectedIndex = n
     var hit = root.results[n]
@@ -309,7 +345,7 @@ Item {
     var hit = root.currentHit()
     if (!hit || hit.kind !== "pdf")
       return
-    var count = Number(root.preview.page_count) || 1
+    var count = Number(root.previewResult.page_count) || 1
     var next = root.pdfPage + delta
     if (next < 1)
       next = 1
@@ -329,7 +365,7 @@ Item {
   function setEmpty(reason, detail) {
     root.emptyReason = reason
     root.emptyDetail = detail || ""
-    root.preview = ({})
+    root.previewResult = ({})
     root.previewLoading = false
   }
 
@@ -370,7 +406,7 @@ Item {
       id: ipcOut
       waitForEnd: true
     }
-    onExited: {
+    onExited: function() {
       var job = root.ipcCurrent
       var text = String(ipcOut.text || "").trim()
       root.ipcCurrent = null
@@ -629,7 +665,7 @@ Item {
           PreviewPane {
             width: parent.width - results.width - Style.space(12)
             height: parent.height
-            preview: root.preview
+            preview: root.previewResult
             loading: root.previewLoading
             emptyReason: root.emptyReason
             emptyDetail: root.emptyDetail
@@ -691,7 +727,7 @@ Item {
       PreviewPane {
         anchors.fill: parent
         anchors.margins: Style.space(24)
-        preview: root.preview
+        preview: root.previewResult
         loading: root.previewLoading
         emptyReason: root.emptyReason
         emptyDetail: root.emptyDetail

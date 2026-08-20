@@ -379,10 +379,10 @@ Item {
     })
   }
 
-  // Root-level string-in/string-out adapters for `omarchy-shell shell call
-  // <id> <method> <arg>`. The host invokes these method NAMES on the loaded
-  // entry point, so every shell-callable verb must exist here (not only on the
-  // direct-target IpcHandler below). Each parses its own JSON argument.
+  // Root-level string-in/string-out adapters. The supported bind path is the
+  // IpcHandler below (`omarchy-shell io.github.chris.quicklook <method> <arg>`).
+  // Overlay forwards here via that target (or serviceFor). Each parses its own
+  // JSON argument.
   function preview(arg) {
     var path = String(arg || "")
     var page = 1

@@ -16,7 +16,7 @@ Five-file demo corpus the overlay shows before you type (invoice, photo, 5k-row 
 omarchy plugin add <git-url> --enable
 ```
 
-That is the whole cold path. The installer does not run build hooks. On first summon the overlay talks to the **service-owned** helper over `omarchy-shell shell call` (Python `compat/` when the Rust binary is missing). Invoice PDF pages rasterize through resource-limited `pdftoppm` when Poppler is installed; images over 20 MP are downsampled before QML sees them. No `build.sh` is required to get a working finder.
+That is the whole cold path. The installer does not run build hooks. On first summon the overlay talks to the **service-owned** helper over `omarchy-shell io.github.chris.quicklook` (Python `compat/` when the Rust binary is missing). Invoice PDF pages rasterize through resource-limited `pdftoppm` when Poppler is installed; images over 20 MP are downsampled before QML sees them. No `build.sh` is required to get a working finder.
 
 The full Rust helper (`nucleo` ranking, sqlite frecency, isolated PDF children, 20 MP downsample) is optional. **This git tree does not and will not contain Linux prebuilts** — the authoring host is macOS, and fake binaries are worse than none.
 
@@ -120,28 +120,31 @@ sysctl fs.inotify.max_user_watches
 
 ## IPC
 
-The shell contract is `call <id> <method> <arg>` — always pass the argument, even when empty:
+`shell summon` / `hide` / `toggle` are host verbs for the overlay kind. Helper
+verbs (`status`, `query`, `preview`, `snapshot`, `theme`, `prefetch`, `warmup`)
+live on the **service `IpcHandler`**. `omarchy-shell shell call <id> <method>`
+hits the overlay loader only — it does not reach the service. The supported
+path is the plugin IpcHandler; always pass the string argument:
 
 ```sh
 omarchy-shell shell toggle io.github.chris.quicklook '{}'
 omarchy-shell shell summon io.github.chris.quicklook '{"path":"/tmp/file.pdf"}'
 omarchy-shell shell hide io.github.chris.quicklook
-omarchy-shell shell call io.github.chris.quicklook status ''
-omarchy-shell shell call io.github.chris.quicklook query invo
-omarchy-shell shell call io.github.chris.quicklook preview '{"path":"/tmp/file.pdf","page":1}'
-omarchy-shell shell call io.github.chris.quicklook snapshot ''
-omarchy-shell shell call io.github.chris.quicklook theme '{"bg":"#1e1e2e","fg":"#cdd6f4","accent":"#89b4fa"}'
+omarchy-shell io.github.chris.quicklook status ''
+omarchy-shell io.github.chris.quicklook query invo
+omarchy-shell io.github.chris.quicklook preview '{"path":"/tmp/file.pdf","page":1}'
+omarchy-shell io.github.chris.quicklook snapshot ''
+omarchy-shell io.github.chris.quicklook theme '{"bg":"#1e1e2e","fg":"#cdd6f4","accent":"#89b4fa"}'
+omarchy-shell io.github.chris.quicklook prefetch /tmp/file.pdf
+omarchy-shell io.github.chris.quicklook warmup ''
 ```
 
-`shell call <id> <method> <arg>` invokes the named method on the loaded plugin
-entry point; every callable verb (`status`, `query`, `preview`, `snapshot`,
-`theme`, `open`, `reveal`, `prefetch`, `warmup`) is a root-level string-in /
-string-out adapter that parses its own JSON argument. `preview` takes either a
-bare path or a `{"path":…,"page":N}` object.
+`preview` takes either a bare path or a `{"path":…,"page":N}` object. Overlay
+root adapters (`query` / `preview` / `snapshot` / `status` / `theme` /
+`prefetch` / `warmup`) forward to that same target (or `serviceFor` when the
+host injects it).
 
-Separately, the service also registers a direct `IpcHandler` target of the same
-id — a distinct surface addressed with `quickshell ipc` (not `omarchy-shell
-shell call`). Each of its typed methods takes one string argument:
+The same IpcHandler is also reachable via `quickshell ipc`:
 
 ```sh
 quickshell ipc -p "$OMARCHY_PATH/shell" call io.github.chris.quicklook ping ''
