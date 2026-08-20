@@ -93,7 +93,22 @@ save_config() {
 }
 
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  # JSON string contents: \, ", C0 controls (including newline).
+  printf '%s' "$1" | od -An -t u1 -v | awk '
+    BEGIN { ORS="" }
+    {
+      for (i = 1; i <= NF; i++) {
+        n = $i + 0
+        if (n == 92) printf "\\\\"
+        else if (n == 34) printf "\\\""
+        else if (n == 10) printf "\\n"
+        else if (n == 13) printf "\\r"
+        else if (n == 9) printf "\\t"
+        else if (n < 32) printf "\\u%04x", n
+        else printf "%c", n
+      }
+    }
+  '
 }
 
 extract_id() {
@@ -283,7 +298,7 @@ run_capped_find() {
   elif command -v perl >/dev/null 2>&1; then
     perl -e 'alarm 2; exec @ARGV' "$@" > "$out" 2>/dev/null || true
   else
-    "$@" 2>/dev/null | head -n 80 > "$out" || true
+    : > "$out"
   fi
 }
 
@@ -293,10 +308,12 @@ find_hits() {
   [ -n "$q" ] || return 0
   raw=$(mktemp)
   located=$(mktemp)
-  if command -v plocate >/dev/null 2>&1; then
-    plocate -il 40 -- "$q" > "$located" 2>/dev/null || true
-  elif command -v locate >/dev/null 2>&1; then
-    locate -il 40 -- "$q" > "$located" 2>/dev/null || true
+  if command -v timeout >/dev/null 2>&1; then
+    if command -v plocate >/dev/null 2>&1; then
+      timeout 2 plocate -il 40 -- "$q" > "$located" 2>/dev/null || true
+    elif command -v locate >/dev/null 2>&1; then
+      timeout 2 locate -il 40 -- "$q" > "$located" 2>/dev/null || true
+    fi
   fi
   if [ -s "$located" ]; then
     while IFS= read -r lp; do
@@ -396,7 +413,7 @@ reply_query() {
 }
 
 png_wh() {
-  hex=$(dd if="$1" bs=1 skip=16 count=8 2>/dev/null | od -An -tx1 | tr -cd '0-9a-f')
+  hex=$(read_user_file dd if="$1" bs=1 skip=16 count=8 2>/dev/null | od -An -tx1 | tr -cd '0-9a-f')
   [ "${#hex}" -ge 16 ] || return 1
   w=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c1-8)")
   h=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c9-16)")
@@ -405,7 +422,7 @@ png_wh() {
 }
 
 gif_wh() {
-  hex=$(dd if="$1" bs=1 skip=6 count=4 2>/dev/null | od -An -tx1 | tr -cd '0-9a-f')
+  hex=$(read_user_file dd if="$1" bs=1 skip=6 count=4 2>/dev/null | od -An -tx1 | tr -cd '0-9a-f')
   [ "${#hex}" -ge 8 ] || return 1
   w=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c3-4)$(printf '%s' "$hex" | cut -c1-2)")
   h=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c7-8)$(printf '%s' "$hex" | cut -c5-6)")
@@ -414,7 +431,7 @@ gif_wh() {
 }
 
 svg_wh() {
-  head=$(dd if="$1" bs=1 count=8192 2>/dev/null)
+  head=$(read_user_file dd if="$1" bs=1 count=8192 2>/dev/null)
   vb=$(printf '%s' "$head" | tr '\n' ' ' | sed -n 's/.*[Vv]iew[Bb]ox=["'\'']\([^"'\'']*\)["'\''].*/\1/p')
   if [ -n "$vb" ]; then
     set -- $vb
@@ -436,17 +453,25 @@ svg_wh() {
   printf '%s %s' "$w" "$h"
 }
 
+read_user_file() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 1 "$@"
+  else
+    "$@"
+  fi
+}
+
 hex_head() {
-  od -An -tx1 -N 256 "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //'
+  read_user_file od -An -tx1 -N 256 "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //'
 }
 
 html_escape_file() {
-  head -c 204800 "$1" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+  read_user_file head -c 204800 "$1" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
 }
 
 csv_preview_json() {
   path="$1"
-  head -n 501 "$path" 2>/dev/null | awk '
+  read_user_file head -n 501 "$path" 2>/dev/null | awk '
     function esc(s) {
       gsub(/\\/, "\\\\", s)
       gsub(/"/, "\\\"", s)
@@ -494,7 +519,7 @@ csv_preview_json() {
 dir_preview_json() {
   path="$1"
   tmp=$(mktemp)
-  ls -1 "$path" 2>/dev/null | head -n 200 > "$tmp"
+  read_user_file ls -1 "$path" 2>/dev/null | head -n 200 > "$tmp"
   entries=""
   while IFS= read -r name || [ -n "$name" ]; do
     [ -n "$name" ] || continue

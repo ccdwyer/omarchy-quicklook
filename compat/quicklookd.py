@@ -276,6 +276,7 @@ def plocate_names(q: str, limit: int) -> list[dict] | None:
             capture_output=True,
             text=True,
             timeout=2,
+            preexec_fn=_limit_child,
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -318,7 +319,9 @@ def find_names(q: str, limit: int) -> list[dict]:
     cmd = ["find", *roots, "-mindepth", "1"]
     cmd.extend(["(", *prune, ")", "-prune", "-o", "-iname", f"*{q}*", "-print"])
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=2, preexec_fn=_limit_child
+        )
     except (subprocess.TimeoutExpired, OSError):
         return []
     return _hits_from_paths(proc.stdout.splitlines(), q, cap)

@@ -3,6 +3,7 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -127,6 +128,21 @@ pub fn which(name: &str) -> Option<std::path::PathBuf> {
 
 pub fn file_exists(path: &Path) -> bool {
     path.is_file()
+}
+
+/// Serialize tests that mutate process-wide `PATH`. Restores PATH on unwind.
+pub fn with_path_lock<R, F: FnOnce() -> R>(f: F) -> R {
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let old = std::env::var("PATH").unwrap_or_default();
+    struct Restore(String);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            std::env::set_var("PATH", &self.0);
+        }
+    }
+    let _restore = Restore(old);
+    f()
 }
 
 #[cfg(test)]

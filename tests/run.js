@@ -358,6 +358,23 @@ test("pdfinfo is isolated; posix timeout is mandatory; build.sh does not mask fa
   assert.ok(!/cp "\$ROOT\/compat\/quicklookd.sh" "\$OUT\/quicklookd"/.test(build))
 })
 
+test("no unbounded subprocesses on untrusted files; json escape; cache rejects empty", () => {
+  const search = fs.readFileSync(path.join(ROOT, "src/quicklookd/src/search.rs"), "utf8")
+  assert.ok(search.indexOf("run_limited") >= 0)
+  assert.ok(!/\.output\(\)/.test(search))
+  const preview = fs.readFileSync(path.join(ROOT, "src/quicklookd/src/preview.rs"), "utf8")
+  assert.ok(preview.indexOf("usable_cache_file") >= 0)
+  assert.ok(!/args\(\["-b"[\s\S]{0,80}\.output\(\)/.test(preview))
+  assert.ok(preview.indexOf("with_path_lock") >= 0)
+  const limits = fs.readFileSync(path.join(ROOT, "src/quicklookd/src/limits.rs"), "utf8")
+  assert.ok(limits.indexOf("with_path_lock") >= 0)
+  const sh = fs.readFileSync(path.join(ROOT, "compat/quicklookd.sh"), "utf8")
+  assert.ok(sh.indexOf("timeout 2 plocate") >= 0 || sh.indexOf("timeout 2 locate") >= 0)
+  assert.ok(sh.indexOf("od -An -t u1") >= 0)
+  const bin = fs.readFileSync(path.join(ROOT, "bin/quicklook"), "utf8")
+  assert.ok(bin.indexOf("od -An -t u1") >= 0)
+})
+
 test("manifest: id, kinds, entryPoints", () => {
   const man = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json"), "utf8"))
   assert.strictEqual(man.schemaVersion, 1)

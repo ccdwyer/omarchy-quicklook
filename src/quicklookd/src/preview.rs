@@ -139,14 +139,14 @@ fn downsample_cached(path: &Path, cache: &PreviewCache, w: u32, h: u32) -> Optio
         ],
         "png",
     );
-    if dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+    if usable_cache_file(&dest) {
         return Some(downsampled_preview(&dest, nw, nh));
     }
     if let Some(parent) = dest.parent() {
         let _ = fs::create_dir_all(parent);
     }
     if downsample_external(path, &dest, nw, nh) || downsample_self(path, &dest, nw, nh) {
-        if dest.is_file() && dest.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+        if usable_cache_file(&dest) {
             cache.gc();
             return Some(downsampled_preview(&dest, nw, nh));
         }
@@ -208,8 +208,7 @@ fn downsample_external(src: &Path, dest: &Path, nw: u32, nh: u32) -> bool {
             let _ = fs::remove_file(dest);
         }
         if run_limited(cmd, Duration::from_secs(12), 512 * 1024 * 1024, 12).is_ok()
-            && dest.is_file()
-            && dest.metadata().map(|m| m.len() > 0).unwrap_or(false)
+            && usable_cache_file(dest)
         {
             return true;
         }
@@ -237,9 +236,7 @@ fn downsample_self(src: &Path, dest: &Path, nw: u32, nh: u32) -> bool {
         &nw.to_string(),
         &nh.to_string(),
     ]);
-    run_limited(cmd, Duration::from_secs(12), 512 * 1024 * 1024, 12).is_ok()
-        && dest.is_file()
-        && dest.metadata().map(|m| m.len() > 0).unwrap_or(false)
+    run_limited(cmd, Duration::from_secs(12), 512 * 1024 * 1024, 12).is_ok() && usable_cache_file(dest)
 }
 
 pub fn downsample_cli(src: &Path, dest: &Path, nw: u32, nh: u32) -> i32 {
@@ -552,7 +549,7 @@ pub fn preview_pdf(path: &Path, page: u32, cache: &PreviewCache, poppler: bool) 
         &[&path.to_string_lossy(), &mtime, &page.to_string(), "pdf"],
         "png",
     );
-    if dest.is_file() {
+    if usable_cache_file(&dest) {
         return Preview {
             kind: "pdf".into(),
             path: Some(dest.to_string_lossy().into()),
@@ -581,7 +578,7 @@ pub fn preview_pdf(path: &Path, page: u32, cache: &PreviewCache, poppler: bool) 
         &prefix.to_string_lossy(),
     ]);
     match run_limited(cmd, Duration::from_secs(8), 512 * 1024 * 1024, 8) {
-        Ok(out) if out.status.success() && dest.is_file() => {
+        Ok(out) if out.status.success() && usable_cache_file(&dest) => {
             cache.gc();
             Preview {
                 kind: "pdf".into(),
@@ -756,6 +753,10 @@ pub fn hex_dump(bytes: &[u8]) -> String {
     out
 }
 
+fn usable_cache_file(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.is_file() && m.len() > 0).unwrap_or(false)
+}
+
 fn magic_of(path: &Path, head: &[u8]) -> String {
     if let Some(kind) = infer::get(head) {
         return format!("{} ({})", kind.mime_type(), kind.extension());
@@ -766,7 +767,9 @@ fn magic_of(path: &Path, head: &[u8]) -> String {
         }
     }
     if let Some(file) = which("file") {
-        if let Ok(out) = Command::new(file).args(["-b", "--", &path.to_string_lossy()]).output() {
+        let mut cmd = Command::new(file);
+        cmd.args(["-b", "--", &path.to_string_lossy()]);
+        if let Ok(out) = run_limited(cmd, Duration::from_millis(800), 32 * 1024 * 1024, 1) {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !s.is_empty() {
                 return s;
@@ -796,7 +799,7 @@ pub fn preview_video(path: &Path, cache: &PreviewCache, ffmpeg: bool) -> Preview
         .map(|d| d.as_millis().to_string())
         .unwrap_or_default();
     let dest = cache.path_for(&[&path.to_string_lossy(), &mtime, "poster"], "png");
-    if !dest.is_file() {
+    if !usable_cache_file(&dest) {
         if let Some(parent) = dest.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -818,7 +821,7 @@ pub fn preview_video(path: &Path, cache: &PreviewCache, ffmpeg: bool) -> Preview
         ]);
         let _ = run_limited(cmd, Duration::from_secs(6), 512 * 1024 * 1024, 6);
     }
-    if dest.is_file() {
+    if usable_cache_file(&dest) {
         cache.gc();
         Preview {
             kind: "image".into(),
@@ -923,44 +926,87 @@ mod tests {
 
     #[test]
     fn pdf_page_count_falls_back_to_capped_count_scan() {
-        let dir = env::temp_dir().join(format!("ql-count-{}", std::process::id()));
-        let _ = fs::create_dir_all(&dir);
-        let path = dir.join("doc.pdf");
-        fs::write(&path, b"%PDF-1.4\n1 0 obj\n<< /Count 7 >>\nendobj\n").unwrap();
-        let old = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", dir.join("empty-bin").display().to_string());
-        let n = pdf_page_count(&path);
-        env::set_var("PATH", old);
-        assert_eq!(n, 7);
-        let _ = fs::remove_dir_all(&dir);
+        crate::limits::with_path_lock(|| {
+            let dir = env::temp_dir().join(format!("ql-count-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            let path = dir.join("doc.pdf");
+            fs::write(&path, b"%PDF-1.4\n1 0 obj\n<< /Count 7 >>\nendobj\n").unwrap();
+            env::set_var("PATH", dir.join("empty-bin").display().to_string());
+            let n = pdf_page_count(&path);
+            assert_eq!(n, 7);
+            let _ = fs::remove_dir_all(&dir);
+        });
     }
 
     #[test]
     fn pdf_page_count_kills_hung_pdfinfo() {
-        let dir = env::temp_dir().join(format!("ql-pdfinfo-{}", std::process::id()));
+        crate::limits::with_path_lock(|| {
+            let dir = env::temp_dir().join(format!("ql-pdfinfo-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            let fake = dir.join("pdfinfo");
+            fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut p = fs::metadata(&fake).unwrap().permissions();
+                p.set_mode(0o755);
+                fs::set_permissions(&fake, p).unwrap();
+            }
+            let path = dir.join("doc.pdf");
+            fs::write(&path, b"%PDF-1.4\n<< /Count 9 >>\n").unwrap();
+            let old = env::var("PATH").unwrap_or_default();
+            env::set_var("PATH", format!("{}:{old}", dir.display()));
+            let start = std::time::Instant::now();
+            let n = pdf_page_count(&path);
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(4),
+                "hung pdfinfo was not killed: {elapsed:?}"
+            );
+            assert_eq!(n, 9, "must fall back to capped /Count scan");
+            let _ = fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn magic_of_kills_hung_file_probe() {
+        crate::limits::with_path_lock(|| {
+            let dir = env::temp_dir().join(format!("ql-file-{}", std::process::id()));
+            let _ = fs::create_dir_all(&dir);
+            let fake = dir.join("file");
+            fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut p = fs::metadata(&fake).unwrap().permissions();
+                p.set_mode(0o755);
+                fs::set_permissions(&fake, p).unwrap();
+            }
+            let blob = dir.join("blob.bin");
+            fs::write(&blob, b"\x00\x01\x02 not a known type").unwrap();
+            let old = env::var("PATH").unwrap_or_default();
+            env::set_var("PATH", format!("{}:{old}", dir.display()));
+            let start = std::time::Instant::now();
+            let magic = magic_of(&blob, b"\x00\x01\x02 not a known type");
+            let elapsed = start.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(4),
+                "hung file(1) was not killed: {elapsed:?}"
+            );
+            assert_eq!(magic, "data");
+            let _ = fs::remove_dir_all(&dir);
+        });
+    }
+
+    #[test]
+    fn zero_byte_cache_file_is_rejected() {
+        let dir = env::temp_dir().join(format!("ql-zbyte-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
-        let fake = dir.join("pdfinfo");
-        fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut p = fs::metadata(&fake).unwrap().permissions();
-            p.set_mode(0o755);
-            fs::set_permissions(&fake, p).unwrap();
-        }
-        let path = dir.join("doc.pdf");
-        fs::write(&path, b"%PDF-1.4\n<< /Count 9 >>\n").unwrap();
-        let old = env::var("PATH").unwrap_or_default();
-        env::set_var("PATH", format!("{}:{old}", dir.display()));
-        let start = std::time::Instant::now();
-        let n = pdf_page_count(&path);
-        let elapsed = start.elapsed();
-        env::set_var("PATH", old);
-        assert!(
-            elapsed < std::time::Duration::from_secs(4),
-            "hung pdfinfo was not killed: {elapsed:?}"
-        );
-        assert_eq!(n, 9, "must fall back to capped /Count scan");
+        let empty = dir.join("empty.png");
+        fs::write(&empty, b"").unwrap();
+        assert!(!usable_cache_file(&empty));
+        fs::write(&empty, b"not-empty").unwrap();
+        assert!(usable_cache_file(&empty));
         let _ = fs::remove_dir_all(&dir);
     }
 

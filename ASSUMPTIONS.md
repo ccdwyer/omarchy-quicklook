@@ -38,6 +38,40 @@ Conservative choices where the Omarchy / Quickshell / Hyprland API was not 100% 
 - **POSIX `pdftoppm`** requires `timeout` as the wall-clock watchdog (plus `ulimit`s). If `timeout` is missing, previews stay metadata-only.
 - **`build.sh` never copies `compat/` onto `bin/quicklookd`.** A failed or missing cargo build exits non-zero and leaves the authentic helper absent; Service already selects `compat/quicklookd.sh` by name.
 
+### External processes (every untrusted-file spawn is killable)
+
+Rust helper (`run_limited` = wall-clock kill + rlimits):
+
+| Binary | When | Bound |
+|---|---|---|
+| `plocate` / `locate` | cold query | `run_limited` 2s / 128 MB / 2s CPU |
+| `pdftoppm` | PDF raster | `run_limited` 8s / 512 MB / 8s CPU |
+| `pdfinfo` | PDF page count | `run_limited` 1.5s / 64 MB / 2s CPU; `/Count` scan fallback |
+| `ffmpeg` / `magick` / `convert` | image downsample, video poster | `run_limited` 6–12s / 512 MB |
+| `quicklookd --downsample` | isolated `image` crate resize | `run_limited` 12s / 512 MB |
+| `file -b` | hex magic fallback after `infer` | `run_limited` 800 ms / 32 MB / 1s CPU |
+| `gio` / `xdg-open` / `open` | Enter / reveal (user-initiated) | `run_limited` 8s / 128 MB |
+
+Python `compat/` (`subprocess.run(..., timeout=, preexec_fn=_limit_child)`):
+
+| Binary | Bound |
+|---|---|
+| `plocate` / `locate` | timeout 2s + rlimits |
+| `find` | timeout 2s + rlimits |
+| `pdftoppm` / `pdfinfo` | timeout 8s / 2s + rlimits |
+| `ffmpeg` / `magick` / `convert` | timeout 12s + rlimits |
+| `gio` / `xdg-open` / `open` | fire-and-forget `Popen` (user-initiated, not waited on) |
+
+POSIX `compat/quicklookd.sh`:
+
+| Binary | Bound |
+|---|---|
+| `plocate` / `locate` | `timeout 2` or skipped |
+| `find` | `timeout 2` (or `perl alarm 2`); skipped if neither exists |
+| `pdftoppm` / `ffmpeg` / `magick` / `convert` | `timeout 8` + ulimits; metadata-only without `timeout` |
+| `dd` / `od` / `head` / `ls` (user files) | `timeout 1` when `timeout` exists |
+| `gio` / `xdg-open` / `open` | background `&` (user-initiated, not waited on) |
+
 ## Out of scope (intentional, spec + tribunal)
 
 - Markdown rendering, archive listing, video playback polish (v1.1).

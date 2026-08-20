@@ -1,14 +1,14 @@
 use crate::exclude;
 use crate::frecency::{mtime_boost, Frecency};
 use crate::kind::{kind_of, Kind};
-use crate::limits::which;
+use crate::limits::{run_limited, which};
 use crate::protocol::Hit;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
 
 #[derive(Clone, Debug)]
@@ -212,10 +212,9 @@ pub fn plocate(query: &str, limit: usize, extra: &[String], roots: &[PathBuf]) -
         return None;
     }
     let bin = which("plocate").or_else(|| which("locate"))?;
-    let output = Command::new(bin)
-        .args(["-il", &limit.to_string(), "--", query])
-        .output()
-        .ok()?;
+    let mut cmd = Command::new(bin);
+    cmd.args(["-il", &limit.to_string(), "--", query]);
+    let output = run_limited(cmd, Duration::from_secs(2), 128 * 1024 * 1024, 2).ok()?;
     if output.stdout.is_empty() {
         return None;
     }
@@ -366,5 +365,34 @@ mod tests {
         let files = vec![file("/a/photo.png", "photo.png", "image")];
         let hits = rank_owned(&files, "zzzz-nope", 10);
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn plocate_kills_hung_child() {
+        crate::limits::with_path_lock(|| {
+            let dir = std::env::temp_dir().join(format!("ql-plocate-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&dir);
+            let fake = dir.join("plocate");
+            std::fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut p = std::fs::metadata(&fake).unwrap().permissions();
+                p.set_mode(0o755);
+                std::fs::set_permissions(&fake, p).unwrap();
+            }
+            let old = std::env::var("PATH").unwrap_or_default();
+            std::env::set_var("PATH", format!("{}:{old}", dir.display()));
+            let start = std::time::Instant::now();
+            let hits = plocate("invoice", 10, &[], &[dir.clone()]);
+            let elapsed = start.elapsed();
+            std::env::set_var("PATH", old);
+            assert!(
+                elapsed < std::time::Duration::from_secs(5),
+                "hung plocate was not killed: {elapsed:?}"
+            );
+            assert!(hits.is_none());
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 }

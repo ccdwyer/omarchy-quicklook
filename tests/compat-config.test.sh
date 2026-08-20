@@ -161,3 +161,25 @@ if [ -f "$pdf" ]; then
   echo "$shpdf" | grep -q '"kind":"pdf"' || { echo "FAIL sh pdf kind"; echo "$shpdf"; exit 1; }
   echo "ok  pdf preview python + posix"
 fi
+
+# JSON escape: quotes, newlines, and other C0 controls (same pipeline as json_escape).
+esc=$(printf 'a\nb"c\t' | od -An -t u1 -v | awk '
+  BEGIN { ORS="" }
+  {
+    for (i = 1; i <= NF; i++) {
+      n = $i + 0
+      if (n == 92) printf "\\\\"
+      else if (n == 34) printf "\\\""
+      else if (n == 10) printf "\\n"
+      else if (n == 13) printf "\\r"
+      else if (n == 9) printf "\\t"
+      else if (n < 32) printf "\\u%04x", n
+      else printf "%c", n
+    }
+  }
+')
+printf '%s\n' "$esc" | grep -Fq '\n' || { printf 'FAIL json_escape newline: %s\n' "$esc"; exit 1; }
+printf '%s\n' "$esc" | grep -Fq '\"' || { printf 'FAIL json_escape quote: %s\n' "$esc"; exit 1; }
+printf '%s\n' "$esc" | grep -Fq '\t' || { printf 'FAIL json_escape tab: %s\n' "$esc"; exit 1; }
+printf '%s\n' "$esc" | grep -q 'a' || { printf 'FAIL json_escape dropped text: %s\n' "$esc"; exit 1; }
+echo "ok  json escape quote/newline/tab"

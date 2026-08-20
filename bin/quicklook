@@ -12,8 +12,21 @@ if [ -n "${1:-}" ]; then
     /*) ;;
     *) path=$(pwd)/$path ;;
   esac
-  # conservative JSON string escape
-  esc=$(printf '%s' "$path" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  esc=$(printf '%s' "$path" | od -An -t u1 -v | awk '
+    BEGIN { ORS="" }
+    {
+      for (i = 1; i <= NF; i++) {
+        n = $i + 0
+        if (n == 92) printf "\\\\"
+        else if (n == 34) printf "\\\""
+        else if (n == 10) printf "\\n"
+        else if (n == 13) printf "\\r"
+        else if (n == 9) printf "\\t"
+        else if (n < 32) printf "\\u%04x", n
+        else printf "%c", n
+      }
+    }
+  ')
   exec omarchy-shell shell summon "$id" "{\"path\":\"$esc\"}"
 fi
 exec omarchy-shell shell toggle "$id" '{}'
