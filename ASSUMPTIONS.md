@@ -35,7 +35,8 @@ Conservative choices where the Omarchy / Quickshell / Hyprland API was not 100% 
 - **`nucleo-matcher` (the matching crate behind `nucleo`)** is used for scoring rather than the threaded `Nucleo` indexer. Same fzf scoring, simpler to test, no extra worker thread.
 - **PDF render failures** set `render_error: true` and omit `path`, so QML never feeds a `.pdf` to `Image`. Enter still opens the hit from the results list.
 - **Images over 20 MP** are downsampled in an isolated child (ffmpeg/magick/`--downsample` with rlimits) and cached. The original oversized file is never given to QML `Image`.
-- **POSIX `pdftoppm`** runs under `ulimit` + `timeout` when those exist; otherwise the fallback is metadata-only.
+- **POSIX `pdftoppm`** requires `timeout` as the wall-clock watchdog (plus `ulimit`s). If `timeout` is missing, previews stay metadata-only.
+- **`build.sh` never copies `compat/` onto `bin/quicklookd`.** A failed or missing cargo build exits non-zero and leaves the authentic helper absent; Service already selects `compat/quicklookd.sh` by name.
 
 ## Out of scope (intentional, spec + tribunal)
 

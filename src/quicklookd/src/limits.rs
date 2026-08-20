@@ -134,6 +134,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_limited_kills_hung_child() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let start = Instant::now();
+        let r = run_limited(cmd, Duration::from_millis(250), 32 * 1024 * 1024, 1);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "run_limited did not kill hung child: {elapsed:?}"
+        );
+        assert!(r.is_err() || !r.unwrap().status.success());
+    }
+
+    #[test]
     fn timeout_kills_slow_closure() {
         let r: Result<u8, _> = with_timeout(50, || {
             thread::sleep(Duration::from_millis(400));

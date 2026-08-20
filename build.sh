@@ -20,19 +20,15 @@ write_checksums() {
 }
 
 if ! command -v cargo >/dev/null 2>&1; then
-  echo "build.sh: cargo not found; installing POSIX fallback as bin/quicklookd" >&2
-  cp "$ROOT/compat/quicklookd.sh" "$OUT/quicklookd"
-  chmod +x "$OUT/quicklookd"
-  echo "build.sh: wrote $OUT/quicklookd (shell fallback)"
-  exit 0
+  echo "build.sh: cargo not found; not installing a fake bin/quicklookd." >&2
+  echo "build.sh: Service will use compat/quicklookd.sh (degraded fallback)." >&2
+  exit 1
 fi
 
 if ! cargo build --release --manifest-path "$SRC/Cargo.toml"; then
-  echo "build.sh: cargo build failed; installing POSIX fallback as bin/quicklookd" >&2
-  cp "$ROOT/compat/quicklookd.sh" "$OUT/quicklookd"
-  chmod +x "$OUT/quicklookd"
-  echo "build.sh: wrote $OUT/quicklookd (shell fallback)"
-  exit 0
+  echo "build.sh: cargo build FAILED; not installing the POSIX fallback as bin/quicklookd." >&2
+  echo "build.sh: the authentic helper did not compile. Service will use compat/quicklookd.sh." >&2
+  exit 1
 fi
 
 BIN="$SRC/target/release/quicklookd"

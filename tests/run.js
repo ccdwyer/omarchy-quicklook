@@ -343,6 +343,21 @@ test("overlay uses documented IPC and does not launch a helper", () => {
   assert.ok(helperGone)
 })
 
+test("pdfinfo is isolated; posix timeout is mandatory; build.sh does not mask failures", () => {
+  const preview = fs.readFileSync(path.join(ROOT, "src/quicklookd/src/preview.rs"), "utf8")
+  assert.ok(preview.indexOf("pdfinfo_page_count") >= 0)
+  assert.ok(preview.indexOf("run_limited") >= 0)
+  assert.ok(!/Command::new\(info\)\.arg\(path\)\.output\(\)/.test(preview))
+  const sh = fs.readFileSync(path.join(ROOT, "compat/quicklookd.sh"), "utf8")
+  assert.ok(/command -v timeout/.test(sh))
+  const iso = sh.slice(sh.indexOf("isolation_ok"), sh.indexOf("run_isolated"))
+  assert.ok(iso.indexOf("timeout") >= 0)
+  assert.ok(!/ulimit -t/.test(iso))
+  const build = fs.readFileSync(path.join(ROOT, "build.sh"), "utf8")
+  assert.ok(build.indexOf("cargo build FAILED") >= 0)
+  assert.ok(!/cp "\$ROOT\/compat\/quicklookd.sh" "\$OUT\/quicklookd"/.test(build))
+})
+
 test("manifest: id, kinds, entryPoints", () => {
   const man = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json"), "utf8"))
   assert.strictEqual(man.schemaVersion, 1)

@@ -27,6 +27,10 @@ target/
 .review_prompt5.md
 .gpt_review_r5.md
 .gpt_review_err5.log
+.fix_prompt_r6.md
+.review_prompt6.md
+.gpt_review_r6.md
+.gpt_review_err6.log
 .code-review-graph/
 .serena/
 __pycache__/

@@ -612,18 +612,32 @@ pub fn preview_pdf(path: &Path, page: u32, cache: &PreviewCache, poppler: bool) 
 }
 
 pub fn pdf_page_count(path: &Path) -> u32 {
-    if let Some(info) = which("pdfinfo") {
-        if let Ok(out) = Command::new(info).arg(path).output() {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("Pages:") {
-                    if let Ok(n) = rest.trim().parse::<u32>() {
-                        return n.max(1);
-                    }
-                }
+    if let Some(n) = pdfinfo_page_count(path) {
+        return n;
+    }
+    count_from_pdf_head(path)
+}
+
+fn pdfinfo_page_count(path: &Path) -> Option<u32> {
+    let bin = which("pdfinfo")?;
+    let mut cmd = Command::new(bin);
+    cmd.arg(path);
+    let out = run_limited(cmd, Duration::from_millis(1500), 64 * 1024 * 1024, 2).ok()?;
+    parse_pdfinfo_pages(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_pdfinfo_pages(text: &str) -> Option<u32> {
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Pages:") {
+            if let Ok(n) = rest.trim().parse::<u32>() {
+                return Some(n.max(1));
             }
         }
     }
+    None
+}
+
+fn count_from_pdf_head(path: &Path) -> u32 {
     let bytes = read_capped(path, PDF_HEAD).unwrap_or_default();
     let s = String::from_utf8_lossy(&bytes);
     let mut best = 1u32;
@@ -899,6 +913,55 @@ mod tests {
         let d = hex_dump(b"ABC");
         assert!(d.contains("41 42 43"));
         assert!(d.contains("ABC"));
+    }
+
+    #[test]
+    fn parse_pdfinfo_pages_reads_pages_line() {
+        assert_eq!(parse_pdfinfo_pages("Title: x\nPages: 12\n"), Some(12));
+        assert_eq!(parse_pdfinfo_pages("no pages here\n"), None);
+    }
+
+    #[test]
+    fn pdf_page_count_falls_back_to_capped_count_scan() {
+        let dir = env::temp_dir().join(format!("ql-count-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("doc.pdf");
+        fs::write(&path, b"%PDF-1.4\n1 0 obj\n<< /Count 7 >>\nendobj\n").unwrap();
+        let old = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", dir.join("empty-bin").display().to_string());
+        let n = pdf_page_count(&path);
+        env::set_var("PATH", old);
+        assert_eq!(n, 7);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pdf_page_count_kills_hung_pdfinfo() {
+        let dir = env::temp_dir().join(format!("ql-pdfinfo-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let fake = dir.join("pdfinfo");
+        fs::write(&fake, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut p = fs::metadata(&fake).unwrap().permissions();
+            p.set_mode(0o755);
+            fs::set_permissions(&fake, p).unwrap();
+        }
+        let path = dir.join("doc.pdf");
+        fs::write(&path, b"%PDF-1.4\n<< /Count 9 >>\n").unwrap();
+        let old = env::var("PATH").unwrap_or_default();
+        env::set_var("PATH", format!("{}:{old}", dir.display()));
+        let start = std::time::Instant::now();
+        let n = pdf_page_count(&path);
+        let elapsed = start.elapsed();
+        env::set_var("PATH", old);
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "hung pdfinfo was not killed: {elapsed:?}"
+        );
+        assert_eq!(n, 9, "must fall back to capped /Count scan");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

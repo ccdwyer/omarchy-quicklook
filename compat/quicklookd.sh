@@ -517,27 +517,18 @@ dir_preview_json() {
 }
 
 isolation_ok() {
-  if command -v timeout >/dev/null 2>&1; then
-    return 0
-  fi
-  if ( ulimit -t 8 ) >/dev/null 2>&1; then
-    return 0
-  fi
-  return 1
+  # Wall-clock watchdog is mandatory. CPU ulimit alone is not enough.
+  command -v timeout >/dev/null 2>&1
 }
 
 run_isolated() {
-  # CPU / address-space / file-size / process-count limits + timeout watchdog.
+  command -v timeout >/dev/null 2>&1 || return 1
   (
     ulimit -t 8 2>/dev/null || true
     ulimit -v 524288 2>/dev/null || true
     ulimit -f 65536 2>/dev/null || true
     ulimit -u 32 2>/dev/null || true
-    if command -v timeout >/dev/null 2>&1; then
-      timeout 8 "$@"
-    else
-      "$@"
-    fi
+    timeout 8 "$@"
   ) >/dev/null 2>&1 || true
 }
 
