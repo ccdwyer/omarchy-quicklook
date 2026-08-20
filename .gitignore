@@ -47,3 +47,11 @@ target/
 .serena/
 __pycache__/
 *.pyc
+
+# internal review artifacts
+.gpt_review_*
+.review_prompt*
+.fix_agent_*
+.fix_prompt*
+.impl_prompt*
+.grok_*
