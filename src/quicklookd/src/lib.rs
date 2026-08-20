@@ -166,7 +166,7 @@ impl Engine {
         let _ = std::fs::create_dir_all(&cfg.cache_dir);
         let _ = std::fs::create_dir_all(&cfg.state_dir);
         let db = cfg.state_dir.join("index.sqlite");
-        let frecency = Frecency::open(&db).expect("open frecency db");
+        let frecency = Frecency::open(&db);
         let persisted = frecency.load_files();
         let cache = PreviewCache::new(cfg.cache_dir.clone(), cfg.cache_bytes);
         cache.gc();

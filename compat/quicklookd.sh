@@ -31,27 +31,65 @@ expand_tilde() {
   esac
 }
 
+# Config is a tagged line file (never sourced / eval'd).
+#   R<TAB>absolute-root
+#   E<TAB>exclude-name
+#   W<TAB>watchCap
+#   C<TAB>cacheMb
+#   M<TAB>maxFiles
 load_config() {
   ROOTS="$HOME_DIR"
   EXTRA_EXCLUDE=""
   WATCH_CAP=2000
   CACHE_MB=500
   MAX_FILES=500000
-  if [ -f "$CONFIG_FILE" ]; then
-    # shellcheck disable=SC1090
-    . "$CONFIG_FILE"
-  fi
+  [ -f "$CONFIG_FILE" ] || return 0
+  loaded_roots=""
+  while IFS= read -r line || [ -n "$line" ]; do
+    tag=${line%%	*}
+    val=${line#*	}
+    case "$tag" in
+      R)
+        [ -n "$val" ] || continue
+        if [ -z "$loaded_roots" ]; then
+          loaded_roots=$val
+        else
+          loaded_roots="$loaded_roots|$val"
+        fi
+        ;;
+      E)
+        [ -n "$val" ] || continue
+        if [ -z "$EXTRA_EXCLUDE" ]; then
+          EXTRA_EXCLUDE=$val
+        else
+          EXTRA_EXCLUDE="$EXTRA_EXCLUDE|$val"
+        fi
+        ;;
+      W) WATCH_CAP=$val ;;
+      C) CACHE_MB=$val ;;
+      M) MAX_FILES=$val ;;
+    esac
+  done < "$CONFIG_FILE"
+  [ -n "$loaded_roots" ] && ROOTS=$loaded_roots
 }
 
 save_config() {
   mkdir -p "$STATE_DIR"
-  {
-    printf 'ROOTS="%s"\n' "$ROOTS"
-    printf 'EXTRA_EXCLUDE="%s"\n' "$EXTRA_EXCLUDE"
-    printf 'WATCH_CAP=%s\n' "$WATCH_CAP"
-    printf 'CACHE_MB=%s\n' "$CACHE_MB"
-    printf 'MAX_FILES=%s\n' "$MAX_FILES"
-  } > "$CONFIG_FILE"
+  : > "$CONFIG_FILE"
+  oldifs=$IFS
+  IFS='|'
+  for r in $ROOTS; do
+    [ -n "$r" ] || continue
+    printf 'R\t%s\n' "$r" >> "$CONFIG_FILE"
+  done
+  for e in $EXTRA_EXCLUDE; do
+    [ -n "$e" ] || continue
+    printf 'E\t%s\n' "$e" >> "$CONFIG_FILE"
+  done
+  IFS=$oldifs
+  printf 'W\t%s\n' "$WATCH_CAP" >> "$CONFIG_FILE"
+  printf 'C\t%s\n' "$CACHE_MB" >> "$CONFIG_FILE"
+  printf 'M\t%s\n' "$MAX_FILES" >> "$CONFIG_FILE"
 }
 
 json_escape() {
@@ -135,8 +173,8 @@ score_name() {
   q=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
   case "$name" in
     "$q") printf '1000' ;;
-    $q*) printf '800' ;;
-    *$q*) printf '600' ;;
+    "$q"*) printf '800' ;;
+    *"$q"*) printf '600' ;;
     *) printf '0' ;;
   esac
 }
@@ -158,9 +196,94 @@ demo_results() {
 }
 
 prune_names() {
-  printf '%s' ".ssh|.gnupg|.password-store|node_modules|target|.git|.hg|keyrings|kwalletd"
+  printf '%s' ".ssh|.gnupg|.password-store|node_modules|target|.git|.hg|.svn|.bzr|__pycache__|.venv|venv|.tox|.mypy_cache|.pytest_cache|.cargo|.rustup|.npm|.cache|.Trash|.local|keyrings|kwalletd|Keychains"
   if [ -n "$EXTRA_EXCLUDE" ]; then
     printf '|%s' "$EXTRA_EXCLUDE"
+  fi
+}
+
+is_secret_file() {
+  case "$1" in
+    .env|.env.*|*.env) return 0 ;;
+    id_rsa|id_ed25519|id_rsa.*) return 0 ;;
+  esac
+  return 1
+}
+
+path_is_secret() {
+  case "$1" in
+    */.ssh/*|*/.gnupg/*|*/.password-store/*|*/.local/share/keyrings/*|*/.local/share/kwalletd/*|*/Library/Keychains/*)
+      return 0
+      ;;
+  esac
+  is_secret_file "$(printf '%s' "$1" | sed 's|.*/||')"
+}
+
+hidden_ancestor() {
+  # Skip hidden/heavy directories unless they are an explicit root.
+  cur=$(dirname "$1")
+  while [ -n "$cur" ] && [ "$cur" != "/" ]; do
+    skip_this=0
+    oldifs=$IFS
+    IFS='|'
+    for r in $ROOTS; do
+      [ "$cur" = "$r" ] && skip_this=1
+    done
+    IFS=$oldifs
+    [ "$skip_this" -eq 0 ] || return 1
+    base=$(printf '%s' "$cur" | sed 's|.*/||')
+    case "$base" in
+      .*) return 0 ;;
+    esac
+    oldifs=$IFS
+    IFS='|'
+    for n in $(prune_names); do
+      [ "$base" = "$n" ] && return 0
+    done
+    IFS=$oldifs
+    np=$(dirname "$cur")
+    [ "$np" = "$cur" ] && break
+    cur=$np
+  done
+  return 1
+}
+
+append_hit() {
+  dest="$1"
+  p="$2"
+  q="$3"
+  path_is_secret "$p" && return 0
+  hidden_ancestor "$p" && return 0
+  sc=$(score_name "$(printf '%s' "$p" | sed 's|.*/||')" "$q")
+  [ "$sc" -gt 0 ] || return 0
+  k=$(kind_of "$p")
+  bn=$(printf '%s' "$p" | sed 's|.*/||')
+  printf '%s {"path":"%s","name":"%s","kind":"%s","score":%s,"mtime":0,"size":0}\n' \
+    "$sc" "$(json_escape "$p")" "$(json_escape "$bn")" "$k" "$sc" >> "$dest"
+}
+
+run_capped_find() {
+  root="$1"
+  q="$2"
+  out="$3"
+  names=$(prune_names)
+  set -f
+  set -- find "$root" -mindepth 1 -maxdepth 6 '(' -name '.*'
+  oldifs=$IFS
+  IFS='|'
+  for n in $names; do
+    [ -n "$n" ] || continue
+    set -- "$@" -o -name "$n"
+  done
+  IFS=$oldifs
+  set -- "$@" ')' -prune -o -iname "*$q*" -print
+  set +f
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 2 "$@" > "$out" 2>/dev/null || true
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm 2; exec @ARGV' "$@" > "$out" 2>/dev/null || true
+  else
+    "$@" 2>/dev/null | head -n 80 > "$out" || true
   fi
 }
 
@@ -168,46 +291,51 @@ find_hits() {
   q=$(safe_glob "$1")
   dest="$2"
   [ -n "$q" ] || return 0
-  names=$(prune_names)
-  expr=""
-  oldifs=$IFS
-  IFS='|'
-  # ROOTS and names are pipe-separated; restore IFS after building expr.
-  for n in $names; do
-    [ -n "$n" ] || continue
-    if [ -z "$expr" ]; then
-      expr="-name $n"
-    else
-      expr="$expr -o -name $n"
-    fi
-  done
-  IFS='|'
-  set -- $ROOTS
-  IFS=$oldifs
-  for root in "$@"; do
-    [ -d "$root" ] || continue
-    # shellcheck disable=SC2086
-    find "$root" \( $expr \) -prune -o -iname "*$q*" -print 2>/dev/null > "$dest.found" || true
-    while IFS= read -r p; do
-      [ -n "$p" ] || continue
-      skip=0
-      for n in $names; do
-        case "$p" in
-          */"$n"|*/"$n"/*) skip=1 ;;
+  raw=$(mktemp)
+  located=$(mktemp)
+  if command -v plocate >/dev/null 2>&1; then
+    plocate -il 40 -- "$q" > "$located" 2>/dev/null || true
+  elif command -v locate >/dev/null 2>&1; then
+    locate -il 40 -- "$q" > "$located" 2>/dev/null || true
+  fi
+  if [ -s "$located" ]; then
+    while IFS= read -r lp; do
+      [ -n "$lp" ] || continue
+      under=0
+      oldifs=$IFS
+      IFS='|'
+      for root in $ROOTS; do
+        case "$lp" in
+          "$root"|"$root"/*) under=1 ;;
         esac
-        [ "$skip" -eq 0 ] || break
       done
-      [ "$skip" -eq 0 ] || continue
-      sc=$(score_name "$(printf '%s' "$p" | sed 's|.*/||')" "$q")
-      [ "$sc" -gt 0 ] || continue
-      k=$(kind_of "$p")
-      bn=$(printf '%s' "$p" | sed 's|.*/||')
-      printf '%s {"path":"%s","name":"%s","kind":"%s","score":%s,"mtime":0,"size":0}\n' \
-        "$sc" "$(json_escape "$p")" "$(json_escape "$bn")" "$k" "$sc" >> "$dest"
-    done < "$dest.found"
-  done
-  IFS=$oldifs
-  rm -f "$dest.found"
+      IFS=$oldifs
+      [ "$under" -eq 1 ] && printf '%s\n' "$lp" >> "$raw"
+    done < "$located"
+  fi
+  rm -f "$located"
+  if [ ! -s "$raw" ]; then
+    oldifs=$IFS
+    IFS='|'
+    set -- $ROOTS
+    IFS=$oldifs
+    : > "$raw"
+    for root in "$@"; do
+      [ -d "$root" ] || continue
+      part=$(mktemp)
+      run_capped_find "$root" "$q" "$part"
+      cat "$part" >> "$raw" 2>/dev/null || true
+      rm -f "$part"
+    done
+  fi
+  n=0
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
+    n=$((n + 1))
+    [ "$n" -le 80 ] || break
+    append_hit "$dest" "$p" "$q"
+  done < "$raw"
+  rm -f "$raw"
 }
 
 reply_status() {
@@ -263,6 +391,24 @@ reply_query() {
   rm -f "$tmp" "$sorted"
 }
 
+png_pixels() {
+  # PNG IHDR width/height at bytes 16-23, big-endian.
+  hex=$(dd if="$1" bs=1 skip=16 count=8 2>/dev/null | od -An -tx1 | tr -cd '0-9a-f')
+  [ "${#hex}" -ge 16 ] || return 1
+  w=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c1-8)")
+  h=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c9-16)")
+  [ "$w" -gt 0 ] && [ "$h" -gt 0 ] || return 1
+  printf '%s' $((w * h))
+}
+
+hex_head() {
+  od -An -tx1 -N 256 "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //'
+}
+
+html_escape_file() {
+  head -c 204800 "$1" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
+}
+
 reply_preview() {
   id="$1"
   path="$2"
@@ -270,17 +416,36 @@ reply_preview() {
   case "$kind" in
     image)
       ext=$(printf '%s' "$path" | awk -F. '{print tolower($NF)}')
-      anim=false
-      [ "$ext" = gif ] && anim=true
-      printf '{"id":%s,"kind":"preview","preview":{"kind":"image","path":"%s","animated":%s}}\n' \
-        "$id" "$(json_escape "$path")" "$anim"
+      if [ "$ext" = gif ] || [ "$ext" = svg ]; then
+        printf '{"id":%s,"kind":"preview","preview":{"kind":"image","path":"%s","animated":%s}}\n' \
+          "$id" "$(json_escape "$path")" "$( [ "$ext" = gif ] && echo true || echo false )"
+      elif [ "$ext" = png ] && pix=$(png_pixels "$path") && [ "$pix" -le 20000000 ]; then
+        printf '{"id":%s,"kind":"preview","preview":{"kind":"image","path":"%s","animated":false}}\n' \
+          "$id" "$(json_escape "$path")"
+      else
+        printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"image","label":"unverifiable or oversized image — hex view","path":"%s"}}\n' \
+          "$id" "$(json_escape "$(hex_head "$path")")" "$(json_escape "$path")"
+      fi
       ;;
     pdf)
       printf '{"id":%s,"kind":"preview","preview":{"kind":"pdf","need_poppler":true,"render_error":false,"label":"compat mode does not rasterize PDFs — Enter opens the file","magic":"PDF document"}}\n' "$id"
       ;;
+    code)
+      printf '{"id":%s,"kind":"preview","preview":{"kind":"code","html":"<pre>%s</pre>","lang":"text","path":"%s"}}\n' \
+        "$id" "$(json_escape "$(html_escape_file "$path")")" "$(json_escape "$path")"
+      ;;
+    csv)
+      printf '{"id":%s,"kind":"preview","preview":{"kind":"code","html":"<pre>%s</pre>","lang":"csv","label":"table (plain)","path":"%s"}}\n' \
+        "$id" "$(json_escape "$(html_escape_file "$path")")" "$(json_escape "$path")"
+      ;;
+    dir)
+      listing=$(ls -1 "$path" 2>/dev/null | head -n 200)
+      printf '{"id":%s,"kind":"preview","preview":{"kind":"code","html":"<pre>%s</pre>","lang":"dir","path":"%s"}}\n' \
+        "$id" "$(json_escape "$listing")" "$(json_escape "$path")"
+      ;;
     *)
-      printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"","magic":"data","label":"can'\''t render this — hex view","path":"%s"}}\n' \
-        "$id" "$(json_escape "$path")"
+      printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"data","label":"can'\''t render this — hex view","path":"%s"}}\n' \
+        "$id" "$(json_escape "$(hex_head "$path")")" "$(json_escape "$path")"
       ;;
   esac
 }

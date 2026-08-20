@@ -83,33 +83,15 @@ pub fn preview_image(path: &Path, cache: &PreviewCache) -> Preview {
         .unwrap_or_default();
     let reader = match image::ImageReader::open(path) {
         Ok(r) => r,
-        Err(_) => {
-            return Preview {
-                kind: "image".into(),
-                path: Some(path.to_string_lossy().into()),
-                ..Preview::default()
-            }
-        }
+        Err(_) => return preview_hex(path),
     };
     let reader = match reader.with_guessed_format() {
         Ok(r) => r,
-        Err(_) => {
-            return Preview {
-                kind: "image".into(),
-                path: Some(path.to_string_lossy().into()),
-                ..Preview::default()
-            }
-        }
+        Err(_) => return preview_hex(path),
     };
     let img = match reader.decode() {
         Ok(i) => i,
-        Err(_) => {
-            return Preview {
-                kind: "image".into(),
-                path: Some(path.to_string_lossy().into()),
-                ..Preview::default()
-            }
-        }
+        Err(_) => return preview_hex(path),
     };
     let w = img.width();
     let h = img.height();
@@ -697,8 +679,8 @@ mod tests {
         fs::write(&path, b"\x00\x01\xff not an image").unwrap();
         let cache = PreviewCache::new(dir.join("c"), 1024 * 1024);
         let p = preview_image(&path, &cache);
-        assert_eq!(p.kind, "image");
-        assert!(p.path.is_some());
+        assert_eq!(p.kind, "hex", "corrupt stills must not be handed to QML Image");
+        assert_eq!(p.label.as_deref(), Some("can't render this — hex view"));
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -15,5 +15,11 @@ target/
 .gpt_review_r2.md
 .gpt_review_err.log
 .gpt_review_err2.log
+.fix_prompt_r3.md
+.review_prompt3.md
+.gpt_review_r3.md
+.gpt_review_err3.log
 .code-review-graph/
 .serena/
+__pycache__/
+*.pyc

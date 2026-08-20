@@ -116,9 +116,46 @@ Item {
       root.sendQueue.push(obj)
       if (!root.oneshotMode && root.pingSent)
         root.oneshotMode = true
-      root.enqueueOneshot(obj)
+      root.flushSendQueue()
     }
     return obj.id
+  }
+
+  function flushSendQueue() {
+    var leftover = []
+    for (var i = 0; i < root.sendQueue.length; i++) {
+      var job = root.sendQueue[i]
+      if (root.oneshotMode || !helper.running) {
+        root.enqueueOneshot(job)
+      } else if (!root.writeLine(JSON.stringify(job) + "\n")) {
+        leftover.push(job)
+      }
+    }
+    root.sendQueue = leftover
+  }
+
+  function enterCompatFallback() {
+    root.helperDead = true
+    root.usingFallback = true
+    root.oneshotMode = true
+    root.helperIsBinary = false
+    root.helperCmd = root.helperSh
+    root.lastStatus = "compat"
+    helper.running = false
+    var abandoned = Protocol.abandonInFlight()
+    root.flushSendQueue()
+    if (abandoned.queuedPreview)
+      root.enqueueOneshot(abandoned.queuedPreview)
+    if (abandoned.previewId && abandoned.previewPath) {
+      root.applyLocalPreview(abandoned.previewId, abandoned.previewPath)
+      root.enqueueOneshot({
+        id: Protocol.nextId(),
+        cmd: "preview",
+        path: abandoned.previewPath
+      })
+    }
+    if (abandoned.queuedPrefetch)
+      root.enqueueOneshot(abandoned.queuedPrefetch)
   }
 
   function enqueueOneshot(obj) {
@@ -368,10 +405,7 @@ Item {
         restartTimer.interval = 300 * root.restarts
         restartTimer.start()
       } else {
-        root.helperDead = true
-        root.usingFallback = true
-        root.oneshotMode = true
-        root.lastStatus = "compat"
+        root.enterCompatFallback()
       }
     }
     onRunningChanged: {
@@ -381,6 +415,7 @@ Item {
           root.pushConfig()
           root.requestStatus()
           root.pingSent = true
+          root.flushSendQueue()
         })
       }
     }

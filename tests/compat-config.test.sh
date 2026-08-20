@@ -35,3 +35,65 @@ echo "$shst" | grep -q "$HOME/keep" || { echo "FAIL sh status roots"; echo "$shs
 missing=$(sh "$ROOT/compat/quicklookd.sh" --oneshot '{"id":7,"cmd":"open","path":"/no/such/quicklook-file"}')
 echo "$missing" | grep -q error || { echo "FAIL sh open missing should error"; echo "$missing"; exit 1; }
 echo "ok  posix fallback config + search + open"
+
+# Privacy: match exclude.rs — no .env, SSH keys, or hidden secret dirs.
+mkdir -p "$HOME/vault/.ssh" "$HOME/vault/.hidden"
+printf 'x\n' > "$HOME/vault/.env"
+printf 'x\n' > "$HOME/vault/.env.local"
+printf 'x\n' > "$HOME/vault/id_rsa"
+printf 'x\n' > "$HOME/vault/id_ed25519"
+printf 'x\n' > "$HOME/vault/.ssh/invoice-key"
+printf 'x\n' > "$HOME/vault/.hidden/invoice-hid.txt"
+printf 'ok\n' > "$HOME/vault/ok-invoice.txt"
+unset QUICKLOOK_FORCE_SH
+python3 "$ROOT/compat/quicklookd.py" --oneshot '{"id":8,"cmd":"config","roots":["'"$HOME/vault"'"]}' >/dev/null
+pout=$(python3 "$ROOT/compat/quicklookd.py" --oneshot '{"id":9,"cmd":"query","q":"invoice"}')
+echo "$pout" | grep -q ok-invoice || { echo "FAIL privacy kept public invoice"; echo "$pout"; exit 1; }
+echo "$pout" | grep -q invoice-key && { echo "FAIL leaked .ssh key name"; echo "$pout"; exit 1; }
+echo "$pout" | grep -q invoice-hid && { echo "FAIL leaked hidden dir"; echo "$pout"; exit 1; }
+echo "$pout" | grep -q id_rsa && { echo "FAIL leaked id_rsa"; echo "$pout"; exit 1; }
+echo "$pout" | grep -q '.env' && { echo "FAIL leaked .env"; echo "$pout"; exit 1; }
+export QUICKLOOK_FORCE_SH=1
+sh "$ROOT/compat/quicklookd.sh" --oneshot '{"id":10,"cmd":"config","roots":["'"$HOME/vault"'"]}' >/dev/null
+spout=$(sh "$ROOT/compat/quicklookd.sh" --oneshot '{"id":11,"cmd":"query","q":"invoice"}')
+echo "$spout" | grep -q ok-invoice || { echo "FAIL sh privacy kept public invoice"; echo "$spout"; exit 1; }
+echo "$spout" | grep -q invoice-key && { echo "FAIL sh leaked .ssh"; echo "$spout"; exit 1; }
+echo "$spout" | grep -q invoice-hid && { echo "FAIL sh leaked hidden"; echo "$spout"; exit 1; }
+echo "$spout" | grep -q id_rsa && { echo "FAIL sh leaked id_rsa"; echo "$spout"; exit 1; }
+echo "ok  privacy exclusions python + posix"
+
+# Oversized / unverifiable images become hex, not raw Image paths.
+python3 - << 'PY'
+import json, os, struct, subprocess, sys
+from pathlib import Path
+root = os.environ["QUICKLOOK_PLUGIN_DIR"]
+home = Path(os.environ["HOME"])
+png = home / "vault" / "huge.png"
+# Valid PNG signature + IHDR claiming 8000x8000 (64 MP)
+ihdr = struct.pack(">IIBBBBB", 8000, 8000, 8, 2, 0, 0, 0)
+raw = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + ihdr + b"\x00\x00\x00\x00" + b"IEND"
+png.write_bytes(raw)
+out = subprocess.check_output(
+    [sys.executable, f"{root}/compat/quicklookd.py", "--oneshot",
+     json.dumps({"id": 12, "cmd": "preview", "path": str(png)})],
+    text=True,
+)
+msg = json.loads(out)
+kind = msg.get("preview", {}).get("kind")
+if kind == "image":
+    sys.stderr.write("FAIL huge png still image: %s\n" % out)
+    sys.exit(1)
+print("ok  python oversized image rejected")
+junk = home / "vault" / "junk.png"
+junk.write_bytes(b"\x00\x01 not a png")
+out = subprocess.check_output(
+    [sys.executable, f"{root}/compat/quicklookd.py", "--oneshot",
+     json.dumps({"id": 13, "cmd": "preview", "path": str(junk)})],
+    text=True,
+)
+kind = json.loads(out).get("preview", {}).get("kind")
+if kind == "image":
+    sys.stderr.write("FAIL junk png still image\n")
+    sys.exit(1)
+print("ok  python unverifiable image rejected")
+PY

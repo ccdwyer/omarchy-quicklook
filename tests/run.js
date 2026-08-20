@@ -130,6 +130,21 @@ test("protocol: prefetch is a separate slot", () => {
   assert.strictEqual(Protocol.slotClass(p.id), "preview")
 })
 
+test("protocol: abandonInFlight clears both slots", () => {
+  const p = Protocol.previewRequest("/sel.rs")
+  const f = Protocol.prefetchRequest("/top.rs")
+  assert.ok(Protocol.queueOrStartPreview(p))
+  assert.ok(Protocol.queueOrStartPrefetch(f))
+  const extra = Protocol.previewRequest("/queued.rs")
+  assert.strictEqual(Protocol.queueOrStartPreview(extra), null)
+  const snap = Protocol.abandonInFlight()
+  assert.strictEqual(Protocol.canStartPreview(), true)
+  assert.strictEqual(Protocol.canStartPrefetch(), true)
+  assert.strictEqual(snap.previewPath, "/sel.rs")
+  assert.ok(snap.queuedPreview)
+  assert.strictEqual(snap.queuedPreview.path, "/queued.rs")
+})
+
 test("protocol: prefetch completion is not a foreground accept", () => {
   const sel = Protocol.previewRequest("/selected.csv")
   assert.ok(Protocol.queueOrStartPreview(sel))

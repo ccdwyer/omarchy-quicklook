@@ -28,9 +28,33 @@ DEFAULT_SKIP = (
     "target",
     ".git",
     ".hg",
+    ".svn",
+    ".bzr",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".cargo",
+    ".rustup",
+    ".npm",
+    ".cache",
+    ".Trash",
+    ".local",
     "keyrings",
     "kwalletd",
+    "Keychains",
 )
+SKIP_PATH_PARTS = (
+    "/.ssh/",
+    "/.gnupg/",
+    "/.password-store/",
+    "/.local/share/keyrings/",
+    "/.local/share/kwalletd/",
+    "/Library/Keychains/",
+)
+MEGAPIXELS = 20_000_000
 
 SETTINGS = {
     "roots": [str(HOME)],
@@ -88,6 +112,40 @@ def apply_settings(data: dict, persist: bool = True) -> None:
 
 def skip_parts() -> tuple[str, ...]:
     return DEFAULT_SKIP + tuple(SETTINGS["extraExclude"])
+
+
+def is_secret_filename(name: str) -> bool:
+    if name == ".env" or name.startswith(".env.") or name.endswith(".env"):
+        return True
+    if name in ("id_rsa", "id_ed25519") or name.startswith("id_rsa."):
+        return True
+    return False
+
+
+def path_is_secret(path: Path) -> bool:
+    s = str(path)
+    if any(part in s for part in SKIP_PATH_PARTS):
+        return True
+    return is_secret_filename(path.name)
+
+
+def hidden_or_heavy_dir(name: str, extra: list[str]) -> bool:
+    if name in DEFAULT_SKIP or name in extra:
+        return True
+    return name.startswith(".") and name not in (".", "..")
+
+
+def should_skip_result(path: Path, extra: list[str] | None = None) -> bool:
+    extra = extra if extra is not None else list(SETTINGS["extraExclude"])
+    roots = [Path(r) for r in SETTINGS["roots"] if r]
+    if path_is_secret(path):
+        return True
+    for parent in [path] + list(path.parents):
+        if any(parent == r or parent == Path(str(r)) for r in roots):
+            break
+        if hidden_or_heavy_dir(parent.name, extra):
+            return True
+    return False
 
 
 load_settings()
@@ -173,41 +231,13 @@ def search(q: str) -> tuple[list[dict], str]:
     return hits[:40], backend
 
 
-def find_names(q: str, limit: int) -> list[dict]:
-    if shutil.which("find") is None:
-        return []
-    roots = [r for r in SETTINGS["roots"] if r]
-    if not roots:
-        roots = [str(HOME)]
-    cap = min(int(limit), 40)
-    q = "".join(ch for ch in q if ch.isalnum() or ch in "._-")
-    if not q:
-        return []
+def _hits_from_paths(paths: list[str], q: str, cap: int) -> list[dict]:
+    extra = list(SETTINGS["extraExclude"])
     out: list[dict] = []
-    skip = skip_parts()
-    prune: list[str] = []
-    for name in skip:
-        if prune:
-            prune.append("-o")
-        prune.extend(["-name", name])
-    cmd = ["find"]
-    cmd.extend(roots)
-    if prune:
-        cmd.extend(["(", *prune, ")", "-prune", "-o"])
-    cmd.extend(["-iname", f"*{q}*", "-print"])
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return out
-    for line in proc.stdout.splitlines():
-        if any(f"/{s}/" in line or line.endswith("/" + s) for s in skip):
-            continue
+    for line in paths:
         p = Path(line)
+        if should_skip_result(p, extra):
+            continue
         try:
             st = p.stat()
         except OSError:
@@ -224,7 +254,135 @@ def find_names(q: str, limit: int) -> list[dict]:
         )
         if len(out) >= cap:
             break
-    return out[: min(cap, SETTINGS["maxFiles"])]
+    return out
+
+
+def plocate_names(q: str, limit: int) -> list[dict] | None:
+    binary = shutil.which("plocate") or shutil.which("locate")
+    if not binary:
+        return None
+    try:
+        proc = subprocess.run(
+            [binary, "-il", str(limit), "--", q],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if not proc.stdout.strip():
+        return None
+    hits = _hits_from_paths(proc.stdout.splitlines(), q, limit)
+    roots = [Path(r) for r in SETTINGS["roots"] if r]
+    if roots:
+        hits = [
+            h
+            for h in hits
+            if any(Path(h["path"]) == r or str(h["path"]).startswith(str(r) + "/") for r in roots)
+        ]
+    return hits or None
+
+
+def find_names(q: str, limit: int) -> list[dict]:
+    roots = [r for r in SETTINGS["roots"] if r]
+    if not roots:
+        roots = [str(HOME)]
+    cap = min(int(limit), 40)
+    q = "".join(ch for ch in q if ch.isalnum() or ch in "._-")
+    if not q:
+        return []
+    located = plocate_names(q, cap)
+    if located:
+        return located
+    if shutil.which("find") is None:
+        return []
+    skip = skip_parts()
+    prune: list[str] = []
+    for name in skip:
+        if prune:
+            prune.append("-o")
+        prune.extend(["-name", name])
+    if prune:
+        prune.extend(["-o", "-name", ".*"])
+    else:
+        prune.extend(["-name", ".*"])
+    cmd = ["find", *roots, "-mindepth", "1"]
+    cmd.extend(["(", *prune, ")", "-prune", "-o", "-iname", f"*{q}*", "-print"])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    return _hits_from_paths(proc.stdout.splitlines(), q, cap)
+
+
+def _be_u32(data: bytes) -> int:
+    return int.from_bytes(data, "big")
+
+
+def image_dims(path: Path) -> tuple[int, int] | None:
+    try:
+        head = path.read_bytes()[: 96 * 1024]
+    except OSError:
+        return None
+    if len(head) >= 24 and head[:8] == b"\x89PNG\r\n\x1a\n":
+        return _be_u32(head[16:20]), _be_u32(head[20:24])
+    if len(head) >= 10 and head[:6] in (b"GIF87a", b"GIF89a"):
+        return int.from_bytes(head[6:8], "little"), int.from_bytes(head[8:10], "little")
+    if head[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(head):
+            if head[i] != 0xFF:
+                i += 1
+                continue
+            marker = head[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3):
+                return int.from_bytes(head[i + 5 : i + 7], "big"), int.from_bytes(
+                    head[i + 7 : i + 9], "big"
+                )
+            if marker in (0xD8, 0xD9):
+                i += 2
+                continue
+            seglen = int.from_bytes(head[i + 2 : i + 4], "big")
+            i += 2 + seglen
+        return None
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        kind = head[12:16]
+        if kind == b"VP8X" and len(head) >= 30:
+            w = 1 + int.from_bytes(head[24:27], "little")
+            h = 1 + int.from_bytes(head[27:30], "little")
+            return w, h
+        if kind == b"VP8 " and len(head) >= 26:
+            return int.from_bytes(head[26:28], "little") & 0x3FFF, int.from_bytes(
+                head[28:30], "little"
+            ) & 0x3FFF
+    return None
+
+
+def preview_image(path: Path) -> dict:
+    ext = path.suffix.lower().lstrip(".")
+    if ext in ("svg", "gif"):
+        return {"kind": "image", "path": str(path), "animated": ext == "gif"}
+    dims = image_dims(path)
+    if not dims or dims[0] <= 0 or dims[1] <= 0:
+        return {
+            "kind": "hex",
+            "hex": "",
+            "magic": "unverifiable image",
+            "label": "can't render this — hex view",
+            "path": str(path),
+        }
+    w, h = dims
+    if w * h > MEGAPIXELS:
+        return {
+            "kind": "hex",
+            "hex": "",
+            "magic": f"image {w}x{h}",
+            "label": "image exceeds 20 MP — hex view",
+            "width": w,
+            "height": h,
+            "path": str(path),
+        }
+    return {"kind": "image", "path": str(path), "animated": False, "width": w, "height": h}
 
 
 def preview(path_s: str, page: int = 1) -> dict:
@@ -248,7 +406,7 @@ def preview(path_s: str, page: int = 1) -> dict:
         return {"kind": "dir", "entries": entries, "total_size": total, "path": str(path)}
     k = kind_of(path)
     if k == "image":
-        return {"kind": "image", "path": str(path), "animated": path.suffix.lower() == ".gif"}
+        return preview_image(path)
     if k == "code":
         data = path.read_bytes()[: 200 * 1024]
         large = path.stat().st_size > 200 * 1024

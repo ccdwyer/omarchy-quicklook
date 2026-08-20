@@ -6,7 +6,9 @@ Indexes `$HOME` by default (skips `.ssh`, `.gnupg`, password-store, keyrings, `n
 
 This is an Omarchy shell plugin (service + overlay). It runs inside the long-lived `omarchy-shell` process. It does not start a second Quickshell instance.
 
-[demo.gif](demo.gif) — five-file demo corpus the overlay shows before you type (invoice, photo, 5k-row CSV, themed Rust, README). Recorded off-device from the shipped samples; a live Hyprland capture is not possible on the macOS authoring host.
+![QuickLook demo corpus — invoice, photo, table, Rust, README](demo.gif)
+
+Five-file demo corpus the overlay shows before you type (invoice, photo, 5k-row CSV, themed Rust, README). Generated off-device from the shipped samples; a live Hyprland capture is not possible on the macOS authoring host.
 
 ## Install
 

@@ -14,12 +14,25 @@ function reset() {
   lastId = 0
   lastAcceptedQueryId = 0
   lastAcceptedPreviewId = 0
+  abandonInFlight()
+}
+
+function abandonInFlight() {
+  var snapshot = {
+    previewId: inFlightPreview,
+    previewPath: inFlightPreviewPath,
+    prefetchId: inFlightPrefetch,
+    prefetchPath: inFlightPrefetchPath,
+    queuedPreview: pendingPreview,
+    queuedPrefetch: pendingPrefetch
+  }
   inFlightPreview = 0
   inFlightPrefetch = 0
   inFlightPreviewPath = ""
   inFlightPrefetchPath = ""
   pendingPreview = null
   pendingPrefetch = null
+  return snapshot
 }
 
 function nextId() {

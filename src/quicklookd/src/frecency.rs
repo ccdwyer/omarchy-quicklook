@@ -3,11 +3,22 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct Frecency {
-    conn: Connection,
+    conn: Option<Connection>,
 }
 
 impl Frecency {
-    pub fn open(path: &Path) -> Result<Self, String> {
+    pub fn disabled() -> Self {
+        Self { conn: None }
+    }
+
+    pub fn open(path: &Path) -> Self {
+        match Self::try_open(path) {
+            Ok(store) => store,
+            Err(_) => Self::disabled(),
+        }
+    }
+
+    fn try_open(path: &Path) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
@@ -32,12 +43,15 @@ impl Frecency {
              );",
         )
         .map_err(|e| e.to_string())?;
-        Ok(Self { conn })
+        Ok(Self { conn: Some(conn) })
     }
 
     pub fn touch(&self, path: &str) -> Result<(), String> {
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
         let now = now_ms();
-        self.conn
+        conn
             .execute(
                 "INSERT INTO selects(path, count, last_ms) VALUES (?1, 1, ?2)
                  ON CONFLICT(path) DO UPDATE SET count = count + 1, last_ms = ?2",
@@ -48,7 +62,10 @@ impl Frecency {
     }
 
     pub fn boost(&self, path: &str) -> i64 {
-        let row = self.conn.query_row(
+        let Some(conn) = self.conn.as_ref() else {
+            return 0;
+        };
+        let row = conn.query_row(
             "SELECT count, last_ms FROM selects WHERE path = ?1",
             params![path],
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
@@ -63,8 +80,10 @@ impl Frecency {
     }
 
     pub fn recent(&self, limit: usize) -> Vec<String> {
-        let mut stmt = match self
-            .conn
+        let Some(conn) = self.conn.as_ref() else {
+            return Vec::new();
+        };
+        let mut stmt = match conn
             .prepare("SELECT path FROM selects ORDER BY last_ms DESC LIMIT ?1")
         {
             Ok(s) => s,
@@ -78,7 +97,10 @@ impl Frecency {
     }
 
     pub fn replace_files(&self, files: &[crate::search::IndexedFile]) -> Result<(), String> {
-        let tx = self.conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        let Some(conn) = self.conn.as_ref() else {
+            return Ok(());
+        };
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         tx.execute("DELETE FROM files", []).map_err(|e| e.to_string())?;
         {
             let mut stmt = tx
@@ -101,8 +123,10 @@ impl Frecency {
     }
 
     pub fn load_files(&self) -> Vec<crate::search::IndexedFile> {
-        let mut stmt = match self
-            .conn
+        let Some(conn) = self.conn.as_ref() else {
+            return Vec::new();
+        };
+        let mut stmt = match conn
             .prepare("SELECT path, name, mtime, size, kind, is_dir FROM files")
         {
             Ok(s) => s,
@@ -125,7 +149,10 @@ impl Frecency {
     }
 
     pub fn set_meta(&self, k: &str, v: &str) {
-        let _ = self.conn.execute(
+        let Some(conn) = self.conn.as_ref() else {
+            return;
+        };
+        let _ = conn.execute(
             "INSERT INTO meta(k, v) VALUES (?1, ?2)
              ON CONFLICT(k) DO UPDATE SET v = ?2",
             params![k, v],
@@ -133,7 +160,8 @@ impl Frecency {
     }
 
     pub fn get_meta(&self, k: &str) -> Option<String> {
-        self.conn
+        let conn = self.conn.as_ref()?;
+        conn
             .query_row("SELECT v FROM meta WHERE k = ?1", params![k], |r| r.get(0))
             .ok()
     }
@@ -204,13 +232,22 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let db = dir.join("i.sqlite");
         let _ = std::fs::remove_file(&db);
-        let f = Frecency::open(&db).unwrap();
+        let f = Frecency::open(&db);
         f.touch("/tmp/invoice.pdf").unwrap();
         f.touch("/tmp/invoice.pdf").unwrap();
         assert!(f.boost("/tmp/invoice.pdf") > 0);
         assert_eq!(f.boost("/nope"), 0);
         assert_eq!(f.recent(4)[0], "/tmp/invoice.pdf");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unwritable_db_disables_history() {
+        let f = Frecency::open(Path::new("/"));
+        assert_eq!(f.boost("/tmp/x"), 0);
+        assert!(f.touch("/tmp/x").is_ok());
+        assert!(f.recent(4).is_empty());
+        assert!(f.replace_files(&[]).is_ok());
     }
 
     #[test]
