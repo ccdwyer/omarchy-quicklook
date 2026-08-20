@@ -852,17 +852,16 @@ do_open() {
   if [ "$reveal" = 1 ] && [ ! -d "$path" ]; then
     target=$(dirname "$path")
   fi
-  watchdog_ok || return 2
   if command -v gio >/dev/null 2>&1; then
-    run_watchdog 8 gio open "$target" >/dev/null 2>&1 || true
+    setsid gio open "$target" >/dev/null 2>&1 &
     return 0
   fi
   if command -v xdg-open >/dev/null 2>&1; then
-    run_watchdog 8 xdg-open "$target" >/dev/null 2>&1 || true
+    setsid xdg-open "$target" >/dev/null 2>&1 &
     return 0
   fi
   if command -v open >/dev/null 2>&1; then
-    run_watchdog 8 open "$target" >/dev/null 2>&1 || true
+    setsid open "$target" >/dev/null 2>&1 &
     return 0
   fi
   return 2

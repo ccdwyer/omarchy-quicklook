@@ -1,33 +1,41 @@
-use crate::limits::{run_limited, which};
+use crate::limits::which;
 use std::path::Path;
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+
+fn spawn_detached(bin: &Path, args: &[&str]) -> Result<(), String> {
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
 
 pub fn open_path(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Err("missing".into());
     }
     let target = path.to_string_lossy().to_string();
+    // Detach. run_limited reaps the process group when xdg-open/gio exits,
+    // which kills the app they just launched.
     if let Some(gio) = which("gio") {
-        let mut cmd = Command::new(gio);
-        cmd.args(["open", &target]);
-        return run_limited(cmd, Duration::from_secs(8), 128 * 1024 * 1024, 4)
-            .map(|_| ())
-            .map_err(|e| e.to_string());
+        return spawn_detached(&gio, &["open", &target]);
     }
     if let Some(xdg) = which("xdg-open") {
-        let mut cmd = Command::new(xdg);
-        cmd.arg(&target);
-        return run_limited(cmd, Duration::from_secs(8), 128 * 1024 * 1024, 4)
-            .map(|_| ())
-            .map_err(|e| e.to_string());
+        return spawn_detached(&xdg, &[&target]);
     }
     if let Some(open) = which("open") {
-        let mut cmd = Command::new(open);
-        cmd.arg(&target);
-        return run_limited(cmd, Duration::from_secs(8), 128 * 1024 * 1024, 4)
-            .map(|_| ())
-            .map_err(|e| e.to_string());
+        return spawn_detached(&open, &[&target]);
     }
     Err("no opener".into())
 }

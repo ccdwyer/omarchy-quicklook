@@ -305,14 +305,27 @@ Item {
     return req.id
   }
 
+  function openExternal(path, reveal) {
+    var p = String(path || "")
+    if (!p.length)
+      return "empty"
+    var argv = ["xdg-open", p]
+    if (reveal)
+      argv = ["sh", "-c", "if [ -d \"$1\" ]; then exec xdg-open \"$1\"; else exec xdg-open \"$(dirname \"$1\")\"; fi", "sh", p]
+    Quickshell.execDetached(argv)
+    return "ok"
+  }
+
   function openPath(path) {
     if (path)
       root.send(Protocol.selectRequest(path))
-    return root.send(Protocol.openRequest(path))
+    return root.openExternal(path, false)
   }
 
   function reveal(path) {
-    return root.send(Protocol.revealRequest(path))
+    if (path)
+      root.send(Protocol.selectRequest(path))
+    return root.openExternal(path, true)
   }
 
   function select(path) {

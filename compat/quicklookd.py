@@ -924,9 +924,15 @@ def open_path(path_s: str, reveal: bool = False) -> dict:
     if opener is None:
         return {"ok": False, "error": "no opener"}
     try:
-        run_killable([opener, *args], timeout_s=8, limits=False)
-    except (subprocess.TimeoutExpired, OSError):
-        return {"ok": False, "error": "opener timeout"}
+        subprocess.Popen(
+            [opener, *args],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
     return {"ok": True}
 
 

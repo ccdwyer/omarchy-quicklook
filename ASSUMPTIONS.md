@@ -76,7 +76,7 @@ Rust helper (`run_limited` = process-group + wall-clock group kill + capped drai
 | `ffmpeg` / `magick` / `convert` | image downsample, video poster | `run_limited` 6–12s / 512 MB |
 | `quicklookd --downsample` | isolated `image` crate resize | `run_limited` 12s / 512 MB |
 | `file -b` | hex magic fallback after `infer` | `run_limited` 800 ms / 32 MB / 1s CPU |
-| `gio` / `xdg-open` / `open` | Enter / reveal (user-initiated) | `run_limited` 8s / 128 MB |
+| `gio` / `xdg-open` / `open` | Enter / reveal (user-initiated) | **detached** (`setsid` + spawn, no wait). `run_limited` reaps the process group when the opener exits and would kill the app it just launched. Overlay Enter also calls `Quickshell.execDetached(["xdg-open", path])` from the shell session. |
 
 Python `compat/` (`run_killable`: new session / `setsid`; on timeout, or on a clean exit while the group is still non-empty, SIGTERM the process group then SIGKILL ~1s later — *before* joining the drain threads):
 

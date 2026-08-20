@@ -318,7 +318,11 @@ Item {
     var hit = root.currentHit()
     if (!hit)
       return
-    root.callIpc("open", hit.path)
+    var svc = root.serviceRef()
+    if (svc && typeof svc.openPath === "function")
+      svc.openPath(hit.path)
+    else
+      Quickshell.execDetached(["xdg-open", hit.path])
     root.close()
   }
 
@@ -326,7 +330,11 @@ Item {
     var hit = root.currentHit()
     if (!hit)
       return
-    root.callIpc("reveal", hit.path)
+    var svc = root.serviceRef()
+    if (svc && typeof svc.reveal === "function")
+      svc.reveal(hit.path)
+    else
+      Quickshell.execDetached(["sh", "-c", "if [ -d \"$1\" ]; then exec xdg-open \"$1\"; else exec xdg-open \"$(dirname \"$1\")\"; fi", "sh", hit.path])
   }
 
   function pinToggle() {
