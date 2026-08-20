@@ -96,4 +96,68 @@ if kind == "image":
     sys.stderr.write("FAIL junk png still image\n")
     sys.exit(1)
 print("ok  python unverifiable image rejected")
+# GIF/SVG without established dims must not pass through as Image.
+svg = home / "vault" / "bomb.svg"
+svg.write_text("<svg xmlns='http://www.w3.org/2000/svg'><rect width='100%' height='100%'/></svg>")
+out = subprocess.check_output(
+    [sys.executable, f"{root}/compat/quicklookd.py", "--oneshot",
+     json.dumps({"id": 14, "cmd": "preview", "path": str(svg)})],
+    text=True,
+)
+kind = json.loads(out).get("preview", {}).get("kind")
+if kind == "image":
+    sys.stderr.write("FAIL percent svg still image\n")
+    sys.exit(1)
+print("ok  python unverifiable svg rejected")
+ok_svg = home / "vault" / "ok.svg"
+ok_svg.write_text("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16'/></svg>")
+out = subprocess.check_output(
+    [sys.executable, f"{root}/compat/quicklookd.py", "--oneshot",
+     json.dumps({"id": 15, "cmd": "preview", "path": str(ok_svg)})],
+    text=True,
+)
+prev = json.loads(out).get("preview", {})
+if prev.get("kind") != "image" or prev.get("width") != 16:
+    sys.stderr.write("FAIL viewBox svg: %s\n" % out)
+    sys.exit(1)
+print("ok  python viewBox svg accepted")
 PY
+
+# Structured CSV / directory descriptors (not generic code text).
+csvp="$HOME/vault/sales.csv"
+printf 'date,sku,qty\n2024-01-01,W,1\n' > "$csvp"
+unset QUICKLOOK_FORCE_SH
+csvout=$(python3 "$ROOT/compat/quicklookd.py" --oneshot "{\"id\":16,\"cmd\":\"preview\",\"path\":\"$csvp\"}")
+echo "$csvout" | grep -q '"kind": "csv"' || echo "$csvout" | grep -q '"kind":"csv"' || { echo "FAIL python csv kind"; echo "$csvout"; exit 1; }
+echo "$csvout" | grep -q '"headers"' || { echo "FAIL python csv headers"; echo "$csvout"; exit 1; }
+dirp="$HOME/vault"
+dirout=$(python3 "$ROOT/compat/quicklookd.py" --oneshot "{\"id\":17,\"cmd\":\"preview\",\"path\":\"$dirp\"}")
+echo "$dirout" | grep -q '"kind": "dir"' || echo "$dirout" | grep -q '"kind":"dir"' || { echo "FAIL python dir kind"; echo "$dirout"; exit 1; }
+echo "$dirout" | grep -q '"entries"' || { echo "FAIL python dir entries"; echo "$dirout"; exit 1; }
+export QUICKLOOK_FORCE_SH=1
+shcsv=$(sh "$ROOT/compat/quicklookd.sh" --oneshot "{\"id\":18,\"cmd\":\"preview\",\"path\":\"$csvp\"}")
+echo "$shcsv" | grep -q '"kind":"csv"' || { echo "FAIL sh csv kind"; echo "$shcsv"; exit 1; }
+echo "$shcsv" | grep -q '"headers"' || { echo "FAIL sh csv headers"; echo "$shcsv"; exit 1; }
+shdir=$(sh "$ROOT/compat/quicklookd.sh" --oneshot "{\"id\":19,\"cmd\":\"preview\",\"path\":\"$dirp\"}")
+echo "$shdir" | grep -q '"kind":"dir"' || { echo "FAIL sh dir kind"; echo "$shdir"; exit 1; }
+echo "$shdir" | grep -q '"entries"' || { echo "FAIL sh dir entries"; echo "$shdir"; exit 1; }
+echo "ok  csv/dir structured descriptors python + posix"
+
+# Invoice PDF: rasterize when pdftoppm exists; never hand a .pdf to Image.
+pdf="$ROOT/samples/invoice.pdf"
+if [ -f "$pdf" ]; then
+  unset QUICKLOOK_FORCE_SH
+  pdfout=$(python3 "$ROOT/compat/quicklookd.py" --oneshot "{\"id\":20,\"cmd\":\"preview\",\"path\":\"$pdf\"}")
+  echo "$pdfout" | grep -q '"kind": "pdf"' || echo "$pdfout" | grep -q '"kind":"pdf"' || { echo "FAIL python pdf kind"; echo "$pdfout"; exit 1; }
+  echo "$pdfout" | grep -q '\.pdf"' && { echo "FAIL python pdf path is raw pdf"; echo "$pdfout"; exit 1; }
+  if command -v pdftoppm >/dev/null 2>&1; then
+    echo "$pdfout" | grep -q '"need_poppler": true' && { echo "FAIL python should rasterize"; echo "$pdfout"; exit 1; }
+    echo "$pdfout" | grep -q '\.png' || echo "$pdfout" | grep -q 'render_error' || {
+      echo "FAIL python pdf neither raster nor render_error"; echo "$pdfout"; exit 1
+    }
+  fi
+  export QUICKLOOK_FORCE_SH=1
+  shpdf=$(sh "$ROOT/compat/quicklookd.sh" --oneshot "{\"id\":21,\"cmd\":\"preview\",\"path\":\"$pdf\"}")
+  echo "$shpdf" | grep -q '"kind":"pdf"' || { echo "FAIL sh pdf kind"; echo "$shpdf"; exit 1; }
+  echo "ok  pdf preview python + posix"
+fi

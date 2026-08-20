@@ -4,11 +4,9 @@ import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
-import "js/Protocol.js" as Protocol
 import "js/Config.js" as Config
 import "js/Theme.js" as Theme
 import "js/Format.js" as Format
-import "js/Fallback.js" as Fallback
 import "js/Binds.js" as Binds
 
 Item {
@@ -17,7 +15,13 @@ Item {
   property var shell: null
   property var manifest: null
   property var pluginRegistry: null
+  property var pluginSettings: null
   property string omarchyPath: Quickshell.env("OMARCHY_PATH") || ""
+  property var roots: []
+  property int watchCap: 2000
+  property int cacheMb: 500
+  property int maxFiles: 500000
+  property var extraExclude: []
   property bool opened: false
   property bool pinned: false
   property bool firstRun: false
@@ -141,65 +145,34 @@ Item {
       root.open("{}")
   }
 
-  function serviceRef() {
-    if (pluginRegistry && typeof pluginRegistry.serviceFor === "function") {
-      var a = pluginRegistry.serviceFor(root.pluginId)
-      if (a)
-        return a
-    }
-    if (shell && typeof shell.serviceFor === "function") {
-      var b = shell.serviceFor(root.pluginId)
-      if (b)
-        return b
-    }
-    if (shell && typeof shell.firstPartyServiceFor === "function") {
-      var c = shell.firstPartyServiceFor(root.pluginId)
-      if (c)
-        return c
-    }
-    return null
+  HelperClient {
+    id: helper
+    pluginDir: root.pluginDir
+    home: Quickshell.env("HOME") || "/tmp"
+    pluginSettings: root.pluginSettings
+    roots: root.roots
+    watchCap: root.watchCap
+    cacheMb: root.cacheMb
+    maxFiles: root.maxFiles
+    extraExclude: root.extraExclude
   }
 
   function pushTheme() {
-    var svc = root.serviceRef()
-    if (svc && typeof svc.setTheme === "function")
-      svc.setTheme(root.palette)
+    helper.setTheme(root.palette)
   }
 
   function requestQuery(q) {
-    var svc = root.serviceRef()
-    if (svc && typeof svc.query === "function") {
-      svc.query(q)
-      return
-    }
-    root.results = Fallback.search(Fallback.defaultSamples(root.pluginDir), q, 40)
-    if (root.results.length)
-      root.requestPreview(root.results[0].path, 1)
-    else
-      root.setEmpty("no matches", "Nothing in the demo corpus or last results for “" + q + "”.")
+    helper.query(q)
   }
 
   function requestPreview(path, page) {
     root.previewLoading = true
     root.pdfPage = page || 1
-    var svc = root.serviceRef()
-    if (svc && typeof svc.preview === "function") {
-      svc.preview(path, root.pdfPage)
-      return
-    }
-    var kind = Format.kindOf(path, false)
-    if (kind === "image")
-      root.preview = { kind: "image", path: path, animated: Format.isAnimated(path) }
-    else
-      root.preview = { kind: kind, path: path }
-    root.previewLoading = false
-    root.emptyReason = ""
+    helper.preview(path, root.pdfPage)
   }
 
   function requestPrefetch(path) {
-    var svc = root.serviceRef()
-    if (svc && typeof svc.prefetch === "function")
-      svc.prefetch(path)
+    helper.prefetch(path)
   }
 
   function currentHit() {
@@ -227,13 +200,7 @@ Item {
     var hit = root.currentHit()
     if (!hit)
       return
-    var svc = root.serviceRef()
-    if (svc && typeof svc.openPath === "function")
-      svc.openPath(hit.path)
-    else if (svc && typeof svc.open === "function")
-      svc.open(hit.path)
-    else
-      Quickshell.execDetached(["gio", "open", hit.path])
+    helper.openPath(hit.path)
     root.close()
   }
 
@@ -241,13 +208,7 @@ Item {
     var hit = root.currentHit()
     if (!hit)
       return
-    var svc = root.serviceRef()
-    if (svc && typeof svc.reveal === "function")
-      svc.reveal(hit.path)
-    else {
-      var dir = Format.dirname(hit.path)
-      Quickshell.execDetached(["gio", "open", dir || hit.path])
-    }
+    helper.reveal(hit.path)
   }
 
   function pinToggle() {
@@ -276,9 +237,7 @@ Item {
   function dismissFirstRun() {
     Config.markFirstRunShown()
     root.firstRun = false
-    var svc = root.serviceRef()
-    if (svc && typeof svc.markFirstRun === "function")
-      svc.markFirstRun()
+    helper.markFirstRun()
   }
 
   function setEmpty(reason, detail) {
@@ -289,12 +248,9 @@ Item {
   }
 
   function pullService() {
-    var svc = root.serviceRef()
-    if (!svc)
-      return
-    if (svc.resultsRevision !== root.lastQueryRev) {
-      root.lastQueryRev = svc.resultsRevision
-      var list = svc.lastResults || []
+    if (helper.resultsRevision !== root.lastQueryRev) {
+      root.lastQueryRev = helper.resultsRevision
+      var list = helper.lastResults || []
       root.results = list
       if (!list.length) {
         if (root.queryText.length)
@@ -313,15 +269,12 @@ Item {
           root.requestPrefetch(top.path)
       }
     }
-    if (svc.previewRevision !== root.lastPreviewRev) {
-      root.lastPreviewRev = svc.previewRevision
-      root.preview = svc.lastPreview || {}
+    if (helper.previewRevision !== root.lastPreviewRev) {
+      root.lastPreviewRev = helper.previewRevision
+      root.preview = helper.lastPreview || {}
       root.previewLoading = false
       if (root.preview && root.preview.page)
         root.pdfPage = Number(root.preview.page) || 1
-    }
-    if (svc.indexing && svc.indexProgress < 1 && !root.queryText.length && root.results.length) {
-      // keep demo visible while honest about indexing
     }
   }
 
@@ -342,15 +295,12 @@ Item {
   }
 
   function indexingCaption() {
-    var svc = root.serviceRef()
-    if (!svc)
-      return ""
-    if (svc.indexing) {
-      var pct = Math.round((Number(svc.indexProgress) || 0) * 100)
+    if (helper.indexing) {
+      var pct = Math.round((Number(helper.indexProgress) || 0) * 100)
       return "indexing… " + pct + "%"
     }
-    if (svc.backend)
-      return String(svc.backend)
+    if (helper.backend)
+      return String(helper.backend)
     return ""
   }
 
@@ -738,12 +688,11 @@ Item {
         Text {
           width: parent.width
           text: {
-            var svc = root.serviceRef()
-            var caps = svc && svc.lastCaps ? svc.lastCaps : {}
+            var caps = helper.lastCaps || {}
             var roots = (caps.roots && caps.roots.length) ? caps.roots.join(", ") : (Quickshell.env("HOME") || "~")
             var watches = (caps.watchCount || 0) + " / " + (caps.watchCap || 2000)
             var cache = Format.humanSize(caps.cacheBytes || 0) + " / " + Format.humanSize(caps.cacheBudget || 524288000)
-            return "roots  " + roots + "\nwatches  " + watches + "   (raise fs.inotify.max_user_watches if a future inotify build needs it)\ncache  " + cache + "\npoppler  " + (caps.poppler ? "yes" : "no") + "   plocate  " + (caps.plocate ? "yes" : "no") + "   helper  " + (caps.helper || "—")
+            return "roots  " + roots + "\nwatches  " + watches + "   (raise fs.inotify.max_user_watches if a future inotify build needs it)\ncache  " + cache + "\npoppler  " + (caps.poppler ? "yes" : "no") + "   plocate  " + (caps.plocate ? "yes" : "no") + "   helper  " + (caps.helper || helper.helperCmd || "—")
           }
           color: root.foreground
           wrapMode: Text.WordWrap

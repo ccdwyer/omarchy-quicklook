@@ -89,6 +89,38 @@ pub fn under_root(path: &Path, roots: &[std::path::PathBuf]) -> bool {
     roots.iter().any(|r| path.starts_with(r))
 }
 
+/// Same ancestor-aware policy as the indexed walk: drop secrets, off-root
+/// hits, and any path whose ancestor (except an explicit root) is hidden or heavy.
+pub fn should_skip_located(path: &Path, extra: &[String], roots: &[std::path::PathBuf]) -> bool {
+    if !normalize_components(path) {
+        return true;
+    }
+    if path_is_secret(path) {
+        return true;
+    }
+    if !roots.is_empty() && !under_root(path, roots) {
+        return true;
+    }
+    let mut ancestor = path.parent();
+    while let Some(dir) = ancestor {
+        if roots.iter().any(|r| dir == r.as_path()) {
+            break;
+        }
+        if dir.as_os_str().is_empty() || dir == Path::new("/") {
+            break;
+        }
+        if should_skip_dir(dir, extra, Path::new("/")) {
+            return true;
+        }
+        let next = dir.parent();
+        if next == Some(dir) {
+            break;
+        }
+        ancestor = next;
+    }
+    false
+}
+
 pub fn normalize_components(path: &Path) -> bool {
     !path.components().any(|c| matches!(c, Component::ParentDir))
 }
@@ -151,6 +183,36 @@ mod tests {
             &PathBuf::from("/home/x/.config"),
             &[],
             &PathBuf::from("/home/x/.config")
+        ));
+    }
+
+    #[test]
+    fn located_skips_hidden_and_heavy_ancestors() {
+        let home = PathBuf::from("/home/x");
+        assert!(should_skip_located(
+            Path::new("/home/x/.cache/invoice.pdf"),
+            &[],
+            &[home.clone()]
+        ));
+        assert!(should_skip_located(
+            Path::new("/home/x/proj/node_modules/pkg/index.js"),
+            &[],
+            &[home.clone()]
+        ));
+        assert!(should_skip_located(
+            Path::new("/home/x/.hidden/invoice-hid.txt"),
+            &[],
+            &[home.clone()]
+        ));
+        assert!(!should_skip_located(
+            Path::new("/home/x/Documents/invoice.pdf"),
+            &[],
+            &[home.clone()]
+        ));
+        assert!(!should_skip_located(
+            Path::new("/home/x/.config/app/settings.json"),
+            &[],
+            &[PathBuf::from("/home/x/.config")]
         ));
     }
 }

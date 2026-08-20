@@ -1,5 +1,5 @@
 use crate::cache::PreviewCache;
-use crate::kind::{ext_of, is_animated, kind_of, pass_through_image, Kind};
+use crate::kind::{ext_of, kind_of, Kind};
 use crate::limits::{run_limited, which, with_timeout};
 use crate::protocol::{DirEnt, Preview};
 use crate::theme::Palette;
@@ -16,6 +16,8 @@ use syntect::util::LinesWithEndings;
 
 const CODE_CAP: usize = 200 * 1024;
 const CSV_ROWS: usize = 500;
+const CSV_CAP: usize = 1024 * 1024;
+const PDF_HEAD: usize = 256 * 1024;
 const HEX_BYTES: usize = 256;
 const MEGAPIXELS: u64 = 20_000_000;
 
@@ -66,73 +68,153 @@ pub fn render(
 }
 
 pub fn preview_image(path: &Path, cache: &PreviewCache) -> Preview {
-    if pass_through_image(path) {
+    let _ = cache;
+    let ext = ext_of(path);
+    let dims = if ext == "svg" {
+        svg_dims(path)
+    } else {
+        header_dims(path)
+    };
+    let Some((w, h)) = dims else {
+        return image_unsafe(path, "unverifiable image");
+    };
+    if w == 0 || h == 0 {
+        return image_unsafe(path, "unverifiable image");
+    }
+    let pixels = w as u64 * h as u64;
+    if pixels > MEGAPIXELS {
+        return oversized_image(path, w, h);
+    }
+    if ext == "svg" || ext == "gif" {
         return Preview {
             kind: "image".into(),
             path: Some(path.to_string_lossy().into()),
-            animated: Some(is_animated(path)),
+            width: Some(w),
+            height: Some(h),
+            animated: Some(ext == "gif"),
             ..Preview::default()
         };
     }
-    let meta = fs::metadata(path).ok();
-    let mtime = meta
-        .as_ref()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis().to_string())
-        .unwrap_or_default();
-    let reader = match image::ImageReader::open(path) {
-        Ok(r) => r,
-        Err(_) => return preview_hex(path),
-    };
-    let reader = match reader.with_guessed_format() {
-        Ok(r) => r,
-        Err(_) => return preview_hex(path),
-    };
-    let img = match reader.decode() {
-        Ok(i) => i,
-        Err(_) => return preview_hex(path),
-    };
-    let w = img.width();
-    let h = img.height();
-    let pixels = w as u64 * h as u64;
-    if pixels <= MEGAPIXELS {
-        return Preview {
+    match decode_bounded(path) {
+        Ok(_) => Preview {
             kind: "image".into(),
             path: Some(path.to_string_lossy().into()),
             width: Some(w),
             height: Some(h),
             animated: Some(false),
             ..Preview::default()
-        };
+        },
+        Err(_) => image_unsafe(path, "can't render this — hex view"),
     }
-    let scale = (MEGAPIXELS as f64 / pixels as f64).sqrt();
-    let nw = ((w as f64) * scale).max(1.0) as u32;
-    let nh = ((h as f64) * scale).max(1.0) as u32;
-    let resized = img.resize(nw, nh, image::imageops::FilterType::Triangle);
-    let dest = cache.path_for(&[&path.to_string_lossy(), &mtime, "img"], "png");
-    if let Some(parent) = dest.parent() {
-        let _ = fs::create_dir_all(parent);
+}
+
+fn header_dims(path: &Path) -> Option<(u32, u32)> {
+    if let Some(d) = sniff_raster_dims(path) {
+        return Some(d);
     }
-    if resized.save(&dest).is_ok() {
-        cache.gc();
-        Preview {
-            kind: "image".into(),
-            path: Some(dest.to_string_lossy().into()),
-            width: Some(nw),
-            height: Some(nh),
-            label: Some("downsampled".into()),
-            ..Preview::default()
+    let reader = image::ImageReader::open(path).ok()?;
+    let reader = reader.with_guessed_format().ok()?;
+    reader.into_dimensions().ok()
+}
+
+fn sniff_raster_dims(path: &Path) -> Option<(u32, u32)> {
+    let head = read_capped(path, 96 * 1024).ok()?;
+    if head.len() >= 24 && head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let w = u32::from_be_bytes(head[16..20].try_into().ok()?);
+        let h = u32::from_be_bytes(head[20..24].try_into().ok()?);
+        if w > 0 && h > 0 {
+            return Some((w, h));
         }
+    }
+    if head.len() >= 10 && (head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a")) {
+        let w = u16::from_le_bytes(head[6..8].try_into().ok()?) as u32;
+        let h = u16::from_le_bytes(head[8..10].try_into().ok()?) as u32;
+        if w > 0 && h > 0 {
+            return Some((w, h));
+        }
+    }
+    None
+}
+
+fn decode_bounded(path: &Path) -> Result<image::DynamicImage, String> {
+    let reader = image::ImageReader::open(path).map_err(|e| e.to_string())?;
+    let mut reader = reader.with_guessed_format().map_err(|e| e.to_string())?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(20_000);
+    limits.max_image_height = Some(20_000);
+    limits.max_alloc = Some(96 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode().map_err(|e| e.to_string())
+}
+
+fn image_unsafe(path: &Path, label: &str) -> Preview {
+    let mut p = preview_hex(path);
+    p.label = Some(label.into());
+    p
+}
+
+fn oversized_image(path: &Path, w: u32, h: u32) -> Preview {
+    let mut p = preview_hex(path);
+    p.magic = Some(format!("image {w}x{h}"));
+    p.label = Some("image exceeds 20 MP — hex view".into());
+    p.width = Some(w);
+    p.height = Some(h);
+    p
+}
+
+fn svg_dims(path: &Path) -> Option<(u32, u32)> {
+    let bytes = read_capped(path, 16 * 1024).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    if let Some((w, h)) = parse_svg_viewbox(&text) {
+        if w > 0 && h > 0 {
+            return Some((w, h));
+        }
+    }
+    let w = parse_svg_len(&text, "width")?;
+    let h = parse_svg_len(&text, "height")?;
+    if w > 0 && h > 0 {
+        Some((w, h))
     } else {
-        Preview {
-            kind: "image".into(),
-            path: Some(path.to_string_lossy().into()),
-            width: Some(w),
-            height: Some(h),
-            ..Preview::default()
-        }
+        None
     }
+}
+
+fn parse_svg_viewbox(s: &str) -> Option<(u32, u32)> {
+    let lower = s.to_ascii_lowercase();
+    let idx = lower.find("viewbox")?;
+    let rest = s[idx + 7..].trim_start();
+    let rest = rest.trim_start_matches(['=', '"', '\'', ' ', '\t']);
+    let mut nums = rest.split(|c: char| c.is_whitespace() || c == ',' || c == '"' || c == '\'');
+    let _x = nums.next()?;
+    let _y = nums.next()?;
+    let w = parse_svg_len_token(nums.next()?)?;
+    let h = parse_svg_len_token(nums.next()?)?;
+    Some((w, h))
+}
+
+fn parse_svg_len(s: &str, attr: &str) -> Option<u32> {
+    let lower = s.to_ascii_lowercase();
+    let key = format!("{attr}=");
+    let idx = lower.find(&key)?;
+    let rest = s[idx + key.len()..].trim_start();
+    let rest = rest.trim_start_matches(['"', '\'']);
+    let token = rest
+        .split(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '>' || c == '/')
+        .next()?;
+    parse_svg_len_token(token)
+}
+
+fn parse_svg_len_token(t: &str) -> Option<u32> {
+    let t = t.trim();
+    if t.ends_with('%') {
+        return None;
+    }
+    let t = t.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let v: f64 = t.parse().ok()?;
+    if !v.is_finite() || v <= 0.0 || v > 1_000_000.0 {
+        return None;
+    }
+    Some(v.round() as u32)
 }
 
 pub fn preview_code(path: &Path, theme: &Theme) -> Preview {
@@ -220,7 +302,7 @@ fn escape_html(s: &str) -> String {
 }
 
 pub fn preview_csv(path: &Path) -> Preview {
-    let data = match fs::read(path) {
+    let data = match read_capped(path, CSV_CAP) {
         Ok(d) => d,
         Err(_) => return preview_hex(path),
     };
@@ -348,8 +430,8 @@ pub fn preview_pdf(path: &Path, page: u32, cache: &PreviewCache, poppler: bool) 
             }
         }
         Ok(_) | Err(_) => {
-            let head = fs::read(path).unwrap_or_default();
-            let hex = hex_dump(&head[..head.len().min(256)]);
+            let head = read_capped(path, HEX_BYTES).unwrap_or_default();
+            let hex = hex_dump(&head);
             Preview {
                 kind: "pdf".into(),
                 need_poppler: Some(false),
@@ -379,9 +461,8 @@ pub fn pdf_page_count(path: &Path) -> u32 {
             }
         }
     }
-    let bytes = fs::read(path).unwrap_or_default();
-    let head = &bytes[..bytes.len().min(256 * 1024)];
-    let s = String::from_utf8_lossy(head);
+    let bytes = read_capped(path, PDF_HEAD).unwrap_or_default();
+    let s = String::from_utf8_lossy(&bytes);
     let mut best = 1u32;
     let mut idx = 0;
     while let Some(at) = s[idx..].find("/Count") {
@@ -680,7 +761,48 @@ mod tests {
         let cache = PreviewCache::new(dir.join("c"), 1024 * 1024);
         let p = preview_image(&path, &cache);
         assert_eq!(p.kind, "hex", "corrupt stills must not be handed to QML Image");
-        assert_eq!(p.label.as_deref(), Some("can't render this — hex view"));
+        assert_eq!(p.label.as_deref(), Some("unverifiable image"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn huge_header_is_hex_without_decode() {
+        let dir = env::temp_dir().join(format!("ql-huge-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("huge.png");
+        let mut raw = b"\x89PNG\r\n\x1a\n".to_vec();
+        raw.extend_from_slice(&13u32.to_be_bytes());
+        raw.extend_from_slice(b"IHDR");
+        raw.extend_from_slice(&8000u32.to_be_bytes());
+        raw.extend_from_slice(&8000u32.to_be_bytes());
+        raw.extend_from_slice(&[8, 2, 0, 0, 0]);
+        raw.extend_from_slice(&[0, 0, 0, 0]);
+        raw.extend_from_slice(b"IEND");
+        fs::write(&path, raw).unwrap();
+        let cache = PreviewCache::new(dir.join("c"), 1024 * 1024);
+        let p = preview_image(&path, &cache);
+        assert_eq!(p.kind, "hex");
+        assert_eq!(p.label.as_deref(), Some("image exceeds 20 MP — hex view"));
+        assert_eq!(p.width, Some(8000));
+        assert_eq!(p.height, Some(8000));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn svg_without_dims_is_hex() {
+        let dir = env::temp_dir().join(format!("ql-svg-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("bomb.svg");
+        fs::write(&path, b"<svg xmlns='http://www.w3.org/2000/svg'><rect width='100%' height='100%'/></svg>").unwrap();
+        let cache = PreviewCache::new(dir.join("c"), 1024 * 1024);
+        let p = preview_image(&path, &cache);
+        assert_eq!(p.kind, "hex");
+        let safe = dir.join("ok.svg");
+        fs::write(&safe, b"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 24'><rect width='32' height='24'/></svg>").unwrap();
+        let ok = preview_image(&safe, &cache);
+        assert_eq!(ok.kind, "image");
+        assert_eq!(ok.width, Some(32));
+        assert_eq!(ok.height, Some(24));
         let _ = fs::remove_dir_all(&dir);
     }
 

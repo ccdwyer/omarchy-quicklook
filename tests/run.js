@@ -84,6 +84,17 @@ test("protocol: stale responses drop", () => {
   assert.strictEqual(Protocol.acceptedQueryId(), 11)
 })
 
+test("protocol: createSession isolates slots from the module", () => {
+  const a = Protocol.createSession()
+  const b = Protocol.createSession()
+  a.markPreview(7, "/a")
+  assert.strictEqual(a.canStartPreview(), false)
+  assert.strictEqual(b.canStartPreview(), true)
+  assert.strictEqual(Protocol.canStartPreview(), true)
+  assert.strictEqual(a.previewRequest("/x.png").id, 1)
+  assert.strictEqual(b.previewRequest("/y.png").id, 1)
+})
+
 test("protocol: preview backpressure slots", () => {
   assert.strictEqual(Protocol.canStartPreview(), true)
   assert.strictEqual(Protocol.canStartPrefetch(), true)
@@ -304,10 +315,24 @@ test("format: local preview never hands a raw pdf to Image", () => {
   assert.strictEqual(Format.isRasterPath("/docs/invoice.pdf"), false)
 })
 
-test("compat python does not invoke pdftoppm", () => {
+test("compat python rasterizes PDFs with resource limits", () => {
   const src = fs.readFileSync(path.join(ROOT, "compat/quicklookd.py"), "utf8")
-  assert.ok(src.indexOf("compat mode does not rasterize") >= 0)
-  assert.ok(!/subprocess\.run\(\s*\[\s*[\"']pdftoppm/.test(src))
+  assert.ok(src.indexOf("pdftoppm") >= 0)
+  assert.ok(src.indexOf("_limit_child") >= 0)
+  assert.ok(src.indexOf("RLIMIT_AS") >= 0)
+  assert.ok(src.indexOf("compat mode does not rasterize") < 0)
+})
+
+test("overlay colocates helper and does not invent serviceFor", () => {
+  const qml = fs.readFileSync(path.join(ROOT, "Overlay.qml"), "utf8")
+  assert.ok(qml.indexOf("HelperClient") >= 0)
+  assert.ok(qml.indexOf("serviceFor") < 0)
+  assert.ok(qml.indexOf("firstPartyServiceFor") < 0)
+  const svc = fs.readFileSync(path.join(ROOT, "Service.qml"), "utf8")
+  assert.ok(/function status\(arg: string\)/.test(svc))
+  assert.ok(/function summon\(arg: string\)/.test(svc))
+  assert.ok(/function hide\(arg: string\)/.test(svc))
+  assert.ok(/function toggle\(arg: string\)/.test(svc))
 })
 
 test("manifest: id, kinds, entryPoints", () => {

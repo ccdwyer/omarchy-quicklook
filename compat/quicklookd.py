@@ -319,6 +319,106 @@ def _be_u32(data: bytes) -> int:
     return int.from_bytes(data, "big")
 
 
+def read_capped(path: Path, cap: int) -> bytes:
+    try:
+        with path.open("rb") as fh:
+            return fh.read(cap)
+    except OSError:
+        return b""
+
+
+def hex_dump(data: bytes) -> str:
+    hex_lines = []
+    for i in range(0, len(data), 16):
+        chunk = data[i : i + 16]
+        hx = " ".join(f"{b:02x}" for b in chunk)
+        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
+        hex_lines.append(f"{i:08x}  {hx:<48} {asc}")
+    return "\n".join(hex_lines) or "(empty)"
+
+
+def hex_preview(path: Path, magic: str, label: str, **extra) -> dict:
+    body = {
+        "kind": "hex",
+        "hex": hex_dump(read_capped(path, 256)),
+        "magic": magic,
+        "label": label,
+        "path": str(path),
+    }
+    body.update(extra)
+    return body
+
+
+def _limit_child() -> None:
+    try:
+        import resource
+    except ImportError:
+        return
+    for name, soft in (
+        ("RLIMIT_CPU", 8),
+        ("RLIMIT_AS", 512 * 1024 * 1024),
+        ("RLIMIT_NPROC", 8),
+        ("RLIMIT_FSIZE", 32 * 1024 * 1024),
+    ):
+        lim = getattr(resource, name, None)
+        if lim is None:
+            continue
+        try:
+            resource.setrlimit(lim, (soft, soft))
+        except (ValueError, OSError):
+            pass
+
+
+def svg_dims(path: Path) -> tuple[int, int] | None:
+    text = read_capped(path, 16 * 1024).decode("utf-8", errors="replace")
+    lower = text.lower()
+    def token_len(raw: str) -> int | None:
+        raw = raw.strip().strip("\"'")
+        if raw.endswith("%"):
+            return None
+        i = 0
+        while i < len(raw) and (raw[i].isdigit() or raw[i] in ".+-"):
+            i += 1
+        if not i:
+            return None
+        try:
+            v = float(raw[:i])
+        except ValueError:
+            return None
+        if v <= 0 or v > 1_000_000:
+            return None
+        return int(round(v))
+
+    idx = lower.find("viewbox")
+    if idx >= 0:
+        rest = text[idx + 7 :].lstrip(" \t=\n\"'")
+        parts = rest.replace(",", " ").split()
+        if len(parts) >= 4:
+            w = token_len(parts[2])
+            h = token_len(parts[3])
+            if w and h:
+                return w, h
+    def attr(name: str) -> int | None:
+        key = name + "="
+        at = lower.find(key)
+        if at < 0:
+            return None
+        rest = text[at + len(key) :].lstrip()
+        rest = rest.lstrip("\"'")
+        tok = ""
+        for ch in rest:
+            if ch in "\"' \t>/":
+                break
+            tok += ch
+        return token_len(tok)
+
+    w = attr("width")
+    h = attr("height")
+    if w and h:
+        return w, h
+    return None
+
+
 def image_dims(path: Path) -> tuple[int, int] | None:
     try:
         head = path.read_bytes()[: 96 * 1024]
@@ -360,29 +460,148 @@ def image_dims(path: Path) -> tuple[int, int] | None:
 
 def preview_image(path: Path) -> dict:
     ext = path.suffix.lower().lstrip(".")
-    if ext in ("svg", "gif"):
-        return {"kind": "image", "path": str(path), "animated": ext == "gif"}
-    dims = image_dims(path)
+    dims = svg_dims(path) if ext == "svg" else image_dims(path)
     if not dims or dims[0] <= 0 or dims[1] <= 0:
-        return {
-            "kind": "hex",
-            "hex": "",
-            "magic": "unverifiable image",
-            "label": "can't render this — hex view",
-            "path": str(path),
-        }
+        return hex_preview(path, "unverifiable image", "can't render this — hex view")
     w, h = dims
     if w * h > MEGAPIXELS:
+        return hex_preview(
+            path,
+            f"image {w}x{h}",
+            "image exceeds 20 MP — hex view",
+            width=w,
+            height=h,
+        )
+    return {
+        "kind": "image",
+        "path": str(path),
+        "animated": ext == "gif",
+        "width": w,
+        "height": h,
+    }
+
+
+def pdf_page_count(path: Path) -> int:
+    info = shutil.which("pdfinfo")
+    if info:
+        try:
+            proc = subprocess.run(
+                [info, str(path)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                preexec_fn=_limit_child,
+            )
+            for line in proc.stdout.splitlines():
+                if line.startswith("Pages:"):
+                    n = int(line.split(":", 1)[1].strip() or "1")
+                    return max(1, n)
+        except (subprocess.TimeoutExpired, OSError, ValueError):
+            pass
+    head = read_capped(path, 256 * 1024).decode("latin-1", errors="replace")
+    best = 1
+    idx = 0
+    while True:
+        at = head.find("/Count", idx)
+        if at < 0:
+            break
+        rest = head[at + 6 :].lstrip()
+        digits = ""
+        for ch in rest:
+            if ch.isdigit():
+                digits += ch
+            elif digits:
+                break
+        if digits:
+            n = int(digits)
+            if 1 < n < 10_000 and n > best:
+                best = n
+        idx = at + 6
+    return best
+
+
+def preview_pdf(path: Path, page: int = 1) -> dict:
+    has_poppler = shutil.which("pdftoppm") is not None
+    page_count = pdf_page_count(path)
+    page = max(1, min(int(page or 1), page_count))
+    if not has_poppler:
         return {
-            "kind": "hex",
-            "hex": "",
-            "magic": f"image {w}x{h}",
-            "label": "image exceeds 20 MP — hex view",
-            "width": w,
-            "height": h,
+            "kind": "pdf",
+            "need_poppler": True,
+            "page": page,
+            "page_count": page_count,
+            "magic": "PDF document",
+            "label": "install poppler for PDF previews",
             "path": str(path),
         }
-    return {"kind": "image", "path": str(path), "animated": False, "width": w, "height": h}
+    cache_dir = CACHE / "pdf"
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        cache_dir = Path("/tmp") / "quicklook-pdf"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+    key = abs(hash(f"{path}:{path.stat().st_mtime if path.exists() else 0}:{page}"))
+    dest = cache_dir / f"{key}.png"
+    if dest.is_file() and dest.stat().st_size > 0:
+        return {
+            "kind": "pdf",
+            "path": str(dest),
+            "page": page,
+            "page_count": page_count,
+            "need_poppler": False,
+        }
+    prefix = dest.with_suffix("")
+    try:
+        proc = subprocess.run(
+            [
+                "pdftoppm",
+                "-f",
+                str(page),
+                "-l",
+                str(page),
+                "-png",
+                "-r",
+                "140",
+                "-singlefile",
+                str(path),
+                str(prefix),
+            ],
+            capture_output=True,
+            timeout=8,
+            preexec_fn=_limit_child,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        proc = None
+    if dest.is_file() and dest.stat().st_size > 0:
+        return {
+            "kind": "pdf",
+            "path": str(dest),
+            "page": page,
+            "page_count": page_count,
+            "need_poppler": False,
+        }
+    # Some pdftoppm builds append -1 even with -singlefile.
+    alt = Path(str(prefix) + "-1.png")
+    if alt.is_file() and alt.stat().st_size > 0:
+        return {
+            "kind": "pdf",
+            "path": str(alt),
+            "page": page,
+            "page_count": page_count,
+            "need_poppler": False,
+        }
+    _ = proc
+    return {
+        "kind": "pdf",
+        "need_poppler": False,
+        "render_error": True,
+        "page": page,
+        "page_count": page_count,
+        "label": "couldn't render this page",
+        "magic": "PDF document",
+        "hex": hex_dump(read_capped(path, 256)),
+        "path": None,
+    }
 
 
 def preview(path_s: str, page: int = 1) -> dict:
@@ -408,8 +627,11 @@ def preview(path_s: str, page: int = 1) -> dict:
     if k == "image":
         return preview_image(path)
     if k == "code":
-        data = path.read_bytes()[: 200 * 1024]
-        large = path.stat().st_size > 200 * 1024
+        data = read_capped(path, 200 * 1024)
+        try:
+            large = path.stat().st_size > 200 * 1024
+        except OSError:
+            large = False
         text = data.decode("utf-8", errors="replace")
         html = "<pre>" + (
             text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -417,41 +639,32 @@ def preview(path_s: str, page: int = 1) -> dict:
         return {"kind": "code", "html": html, "lang": path.suffix.lstrip("."), "large": large,
                 "capped": large, "label": "large file" if large else "", "path": str(path)}
     if k == "csv":
-        text = path.read_text(errors="replace")
+        text = read_capped(path, 1024 * 1024).decode("utf-8", errors="replace")
         first = text.split("\n", 1)[0]
         delim = ","
         if first.count("\t") > first.count(","):
             delim = "\t"
-        rows = [ln.split(delim) for ln in text.splitlines()[:501]]
+        elif first.count(";") > first.count(","):
+            delim = ";"
+        elif first.count("|") > first.count(","):
+            delim = "|"
+        lines = text.splitlines()
+        rows = [ln.split(delim) for ln in lines[:501]]
         headers = rows[0] if rows else []
         body = rows[1:501] if rows else []
-        return {"kind": "csv", "headers": headers, "rows": body, "truncated": len(text.splitlines()) > 501}
-    if k == "pdf":
-        # Compat never runs pdftoppm: no rlimits here, and a shared raster
-        # would stale across files. Isolated PDF children stay in quicklookd.
-        has_poppler = shutil.which("pdftoppm") is not None
+        try:
+            oversized = path.stat().st_size > 1024 * 1024
+        except OSError:
+            oversized = False
         return {
-            "kind": "pdf",
-            "need_poppler": not has_poppler,
-            "render_error": has_poppler,
-            "page": page,
-            "page_count": 1,
-            "label": (
-                "install poppler for PDF previews"
-                if not has_poppler
-                else "compat mode does not rasterize PDFs — Enter opens the file"
-            ),
-            "magic": "PDF document",
+            "kind": "csv",
+            "headers": headers,
+            "rows": body,
+            "truncated": len(lines) > 501 or oversized,
         }
-    head = path.read_bytes()[:256]
-    hex_lines = []
-    for i in range(0, len(head), 16):
-        chunk = head[i:i + 16]
-        hx = " ".join(f"{b:02x}" for b in chunk)
-        asc = "".join(chr(b) if 32 <= b < 127 else "." for b in chunk)
-        hex_lines.append(f"{i:08x}  {hx:<48} {asc}")
-    return {"kind": "hex", "hex": "\n".join(hex_lines) or "(empty)", "magic": "data",
-            "label": "can't render this — hex view", "path": str(path)}
+    if k == "pdf":
+        return preview_pdf(path, page)
+    return hex_preview(path, "data", "can't render this — hex view")
 
 
 def open_path(path_s: str, reveal: bool = False) -> dict:

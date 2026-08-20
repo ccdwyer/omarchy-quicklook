@@ -353,8 +353,12 @@ reply_status() {
   done
   IFS=$oldifs
   budget=$((CACHE_MB * 1024 * 1024))
-  printf '{"id":%s,"kind":"status","indexing":false,"progress":1,"backend":"compat","status":{"indexing":false,"progress":1,"backend":"compat","files":5,"watchCount":0,"watchCap":%s,"roots":[%s],"cacheBytes":0,"cacheBudget":%s,"poppler":false,"plocate":false,"ffmpeg":false,"helper":"compat","version":"1.0.0"}}\n' \
-    "$id" "$WATCH_CAP" "$roots_json" "$budget"
+  poppler=false
+  command -v pdftoppm >/dev/null 2>&1 && poppler=true
+  plocate=false
+  { command -v plocate >/dev/null 2>&1 || command -v locate >/dev/null 2>&1; } && plocate=true
+  printf '{"id":%s,"kind":"status","indexing":false,"progress":1,"backend":"compat","status":{"indexing":false,"progress":1,"backend":"compat","files":5,"watchCount":0,"watchCap":%s,"roots":[%s],"cacheBytes":0,"cacheBudget":%s,"poppler":%s,"plocate":%s,"ffmpeg":false,"helper":"compat","version":"1.0.0"}}\n' \
+    "$id" "$WATCH_CAP" "$roots_json" "$budget" "$poppler" "$plocate"
 }
 
 reply_query() {
@@ -391,14 +395,45 @@ reply_query() {
   rm -f "$tmp" "$sorted"
 }
 
-png_pixels() {
-  # PNG IHDR width/height at bytes 16-23, big-endian.
+png_wh() {
   hex=$(dd if="$1" bs=1 skip=16 count=8 2>/dev/null | od -An -tx1 | tr -cd '0-9a-f')
   [ "${#hex}" -ge 16 ] || return 1
   w=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c1-8)")
   h=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c9-16)")
   [ "$w" -gt 0 ] && [ "$h" -gt 0 ] || return 1
-  printf '%s' $((w * h))
+  printf '%s %s' "$w" "$h"
+}
+
+gif_wh() {
+  hex=$(dd if="$1" bs=1 skip=6 count=4 2>/dev/null | od -An -tx1 | tr -cd '0-9a-f')
+  [ "${#hex}" -ge 8 ] || return 1
+  w=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c3-4)$(printf '%s' "$hex" | cut -c1-2)")
+  h=$(printf '%d' "0x$(printf '%s' "$hex" | cut -c7-8)$(printf '%s' "$hex" | cut -c5-6)")
+  [ "$w" -gt 0 ] && [ "$h" -gt 0 ] || return 1
+  printf '%s %s' "$w" "$h"
+}
+
+svg_wh() {
+  head=$(dd if="$1" bs=1 count=8192 2>/dev/null)
+  vb=$(printf '%s' "$head" | tr '\n' ' ' | sed -n 's/.*[Vv]iew[Bb]ox=["'\'']\([^"'\'']*\)["'\''].*/\1/p')
+  if [ -n "$vb" ]; then
+    set -- $vb
+    if [ "$#" -ge 4 ]; then
+      w=$(printf '%s' "$3" | tr -cd '0-9.')
+      h=$(printf '%s' "$4" | tr -cd '0-9.')
+      w=${w%%.*}
+      h=${h%%.*}
+      [ -n "$w" ] && [ -n "$h" ] && [ "$w" -gt 0 ] && [ "$h" -gt 0 ] || return 1
+      printf '%s %s' "$w" "$h"
+      return 0
+    fi
+  fi
+  w=$(printf '%s' "$head" | tr '\n' ' ' | sed -n 's/.*[Ww]idth=["'\'']\([0-9.][0-9.]*\).*/\1/p')
+  h=$(printf '%s' "$head" | tr '\n' ' ' | sed -n 's/.*[Hh]eight=["'\'']\([0-9.][0-9.]*\).*/\1/p')
+  w=${w%%.*}
+  h=${h%%.*}
+  [ -n "$w" ] && [ -n "$h" ] && [ "$w" -gt 0 ] && [ "$h" -gt 0 ] || return 1
+  printf '%s %s' "$w" "$h"
 }
 
 hex_head() {
@@ -409,39 +444,156 @@ html_escape_file() {
   head -c 204800 "$1" 2>/dev/null | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'
 }
 
+csv_preview_json() {
+  path="$1"
+  head -n 501 "$path" 2>/dev/null | awk '
+    function esc(s) {
+      gsub(/\\/, "\\\\", s)
+      gsub(/"/, "\\\"", s)
+      return s
+    }
+    function arr(line,    n, i, out, a) {
+      n = split(line, a, FS)
+      out = "["
+      for (i = 1; i <= n; i++) {
+        if (i > 1) out = out ","
+        out = out "\"" esc(a[i]) "\""
+      }
+      return out "]"
+    }
+    BEGIN { headers = "[]"; rows = ""; nbody = 0 }
+    NR == 1 {
+      line = $0
+      c = gsub(/,/, ",", line)
+      line = $0
+      t = gsub(/\t/, "\t", line)
+      line = $0
+      s = gsub(/;/, ";", line)
+      line = $0
+      p = gsub(/\|/, "|", line)
+      FS = ","
+      if (t > c && t >= s && t >= p) FS = "\t"
+      else if (s > c && s >= t && s >= p) FS = ";"
+      else if (p > c && p >= t && p >= s) FS = "|"
+      $0 = $0
+      headers = arr($0)
+      next
+    }
+    {
+      if (nbody) rows = rows ","
+      rows = rows arr($0)
+      nbody++
+    }
+    END {
+      trunc = (NR > 501) ? "true" : "false"
+      printf "{\"kind\":\"csv\",\"headers\":%s,\"rows\":[%s],\"truncated\":%s}", headers, rows, trunc
+    }
+  '
+}
+
+dir_preview_json() {
+  path="$1"
+  tmp=$(mktemp)
+  ls -1 "$path" 2>/dev/null | head -n 200 > "$tmp"
+  entries=""
+  while IFS= read -r name || [ -n "$name" ]; do
+    [ -n "$name" ] || continue
+    full="$path/$name"
+    k=$(kind_of "$full")
+    sz=0
+    if [ -f "$full" ]; then
+      sz=$(wc -c < "$full" 2>/dev/null | tr -d ' ')
+      [ -n "$sz" ] || sz=0
+    fi
+    ent="{\"name\":\"$(json_escape "$name")\",\"kind\":\"$k\",\"size\":$sz}"
+    if [ -z "$entries" ]; then
+      entries="$ent"
+    else
+      entries="$entries,$ent"
+    fi
+  done < "$tmp"
+  rm -f "$tmp"
+  printf '{"kind":"dir","entries":[%s],"path":"%s"}' "$entries" "$(json_escape "$path")"
+}
+
+run_pdftoppm() {
+  path="$1"
+  page="$2"
+  dest="$3"
+  prefix="${dest%.png}"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 8 pdftoppm -f "$page" -l "$page" -png -r 140 -singlefile "$path" "$prefix" >/dev/null 2>&1 || true
+  else
+    pdftoppm -f "$page" -l "$page" -png -r 140 -singlefile "$path" "$prefix" >/dev/null 2>&1 || true
+  fi
+}
+
 reply_preview() {
   id="$1"
   path="$2"
+  page="${3:-1}"
+  [ -n "$page" ] || page=1
   kind=$(kind_of "$path")
   case "$kind" in
     image)
       ext=$(printf '%s' "$path" | awk -F. '{print tolower($NF)}')
-      if [ "$ext" = gif ] || [ "$ext" = svg ]; then
-        printf '{"id":%s,"kind":"preview","preview":{"kind":"image","path":"%s","animated":%s}}\n' \
-          "$id" "$(json_escape "$path")" "$( [ "$ext" = gif ] && echo true || echo false )"
-      elif [ "$ext" = png ] && pix=$(png_pixels "$path") && [ "$pix" -le 20000000 ]; then
-        printf '{"id":%s,"kind":"preview","preview":{"kind":"image","path":"%s","animated":false}}\n' \
-          "$id" "$(json_escape "$path")"
+      wh=""
+      case "$ext" in
+        png) wh=$(png_wh "$path") || wh="" ;;
+        gif) wh=$(gif_wh "$path") || wh="" ;;
+        svg) wh=$(svg_wh "$path") || wh="" ;;
+        *) wh="" ;;
+      esac
+      if [ -n "$wh" ]; then
+        set -- $wh
+        w=$1
+        h=$2
+        pix=$((w * h))
+        if [ "$pix" -le 20000000 ] && [ "$w" -gt 0 ] && [ "$h" -gt 0 ]; then
+          anim=false
+          [ "$ext" = gif ] && anim=true
+          printf '{"id":%s,"kind":"preview","preview":{"kind":"image","path":"%s","animated":%s,"width":%s,"height":%s}}\n' \
+            "$id" "$(json_escape "$path")" "$anim" "$w" "$h"
+        else
+          printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"image %sx%s","label":"image exceeds 20 MP — hex view","width":%s,"height":%s,"path":"%s"}}\n' \
+            "$id" "$(json_escape "$(hex_head "$path")")" "$w" "$h" "$w" "$h" "$(json_escape "$path")"
+        fi
       else
-        printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"image","label":"unverifiable or oversized image — hex view","path":"%s"}}\n' \
+        printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"unverifiable image","label":"can'\''t render this — hex view","path":"%s"}}\n' \
           "$id" "$(json_escape "$(hex_head "$path")")" "$(json_escape "$path")"
       fi
       ;;
     pdf)
-      printf '{"id":%s,"kind":"preview","preview":{"kind":"pdf","need_poppler":true,"render_error":false,"label":"compat mode does not rasterize PDFs — Enter opens the file","magic":"PDF document"}}\n' "$id"
+      if command -v pdftoppm >/dev/null 2>&1; then
+        cache_dir="${XDG_CACHE_HOME:-$HOME_DIR/.cache}/quicklook/pdf"
+        mkdir -p "$cache_dir" 2>/dev/null || cache_dir="/tmp/quicklook-pdf"
+        mkdir -p "$cache_dir"
+        dest="$cache_dir/p${page}-$$.png"
+        run_pdftoppm "$path" "$page" "$dest"
+        if [ ! -s "$dest" ] && [ -s "${dest%.png}-1.png" ]; then
+          dest="${dest%.png}-1.png"
+        fi
+        if [ -s "$dest" ]; then
+          printf '{"id":%s,"kind":"preview","preview":{"kind":"pdf","path":"%s","page":%s,"page_count":1,"need_poppler":false}}\n' \
+            "$id" "$(json_escape "$dest")" "$page"
+        else
+          printf '{"id":%s,"kind":"preview","preview":{"kind":"pdf","need_poppler":false,"render_error":true,"page":%s,"page_count":1,"label":"couldn'\''t render this page","magic":"PDF document","hex":"%s"}}\n' \
+            "$id" "$page" "$(json_escape "$(hex_head "$path")")"
+        fi
+      else
+        printf '{"id":%s,"kind":"preview","preview":{"kind":"pdf","need_poppler":true,"page":%s,"page_count":1,"label":"install poppler for PDF previews","magic":"PDF document","path":"%s"}}\n' \
+          "$id" "$page" "$(json_escape "$path")"
+      fi
       ;;
     code)
       printf '{"id":%s,"kind":"preview","preview":{"kind":"code","html":"<pre>%s</pre>","lang":"text","path":"%s"}}\n' \
         "$id" "$(json_escape "$(html_escape_file "$path")")" "$(json_escape "$path")"
       ;;
     csv)
-      printf '{"id":%s,"kind":"preview","preview":{"kind":"code","html":"<pre>%s</pre>","lang":"csv","label":"table (plain)","path":"%s"}}\n' \
-        "$id" "$(json_escape "$(html_escape_file "$path")")" "$(json_escape "$path")"
+      printf '{"id":%s,"kind":"preview","preview":%s}\n' "$id" "$(csv_preview_json "$path")"
       ;;
     dir)
-      listing=$(ls -1 "$path" 2>/dev/null | head -n 200)
-      printf '{"id":%s,"kind":"preview","preview":{"kind":"code","html":"<pre>%s</pre>","lang":"dir","path":"%s"}}\n' \
-        "$id" "$(json_escape "$listing")" "$(json_escape "$path")"
+      printf '{"id":%s,"kind":"preview","preview":%s}\n' "$id" "$(dir_preview_json "$path")"
       ;;
     *)
       printf '{"id":%s,"kind":"preview","preview":{"kind":"hex","hex":"%s","magic":"data","label":"can'\''t render this — hex view","path":"%s"}}\n' \
@@ -489,7 +641,7 @@ handle_line() {
       reply_status "$id"
       ;;
     *'"cmd":"preview"'*|*'cmd": "preview"'*|*'cmd":"prefetch"'*|*'cmd": "prefetch"'*|*'cmd":"page"'*|*'cmd": "page"'*)
-      reply_preview "$id" "$(extract_string "$line" "path")"
+      reply_preview "$id" "$(extract_string "$line" "path")" "$(extract_number "$line" "page")"
       ;;
     *'"cmd":"open"'*|*'cmd": "open"'*)
       path=$(extract_string "$line" "path")
@@ -515,7 +667,7 @@ handle_line() {
       reply_query "$id" "$q"
       ;;
     *)
-      reply_preview "$id" "$(extract_string "$line" "path")"
+      reply_preview "$id" "$(extract_string "$line" "path")" "$(extract_number "$line" "page")"
       ;;
   esac
 }

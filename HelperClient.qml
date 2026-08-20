@@ -4,36 +4,24 @@ import Quickshell.Io
 import "js/Protocol.js" as Protocol
 import "js/Config.js" as Config
 import "js/Fallback.js" as Fallback
-import "js/Theme.js" as Theme
 import "js/Format.js" as Format
 
+// Overlay-owned helper. Documented NDJSON stdin/stdout (or --oneshot).
+// No pluginRegistry.serviceFor / shell.serviceFor — Overlay talks to this Item.
 Item {
   id: root
 
-  property var shell: null
-  property var manifest: null
-  property var pluginRegistry: null
   property var pluginSettings: null
-  property string omarchyPath: Quickshell.env("OMARCHY_PATH") || ""
-
-  readonly property string pluginId: "io.github.chris.quicklook"
-  readonly property string pluginDir: {
-    var u = String(Qt.resolvedUrl("."))
-    if (u.indexOf("file://") === 0)
-      u = u.slice(7)
-    if (u.length > 1 && u.charAt(u.length - 1) === "/")
-      u = u.slice(0, u.length - 1)
-    return u
-  }
-
-  // Inline shell.json fields. The host may assign these from the plugins[] entry.
   property var roots: []
   property int watchCap: 2000
   property int cacheMb: 500
   property int maxFiles: 500000
   property var extraExclude: []
 
-  readonly property string home: Quickshell.env("HOME") || "/tmp"
+  property string pluginDir: ""
+  property string home: Quickshell.env("HOME") || "/tmp"
+  property string pluginId: "io.github.chris.quicklook"
+
   readonly property string stateDir: {
     var xdg = Quickshell.env("XDG_STATE_HOME")
     if (xdg && xdg.length)
@@ -65,6 +53,15 @@ Item {
   property bool stdinWorks: false
   property bool pingSent: false
   property var sendQueue: []
+  property var proto: null
+  property var oneshotQueue: []
+  property var oneshotCurrent: null
+
+  function session() {
+    if (!root.proto)
+      root.proto = Protocol.createSession()
+    return root.proto
+  }
 
   function applyHostSettings() {
     var entry = {
@@ -105,8 +102,9 @@ Item {
   function send(obj) {
     if (!obj)
       return 0
+    var P = root.session()
     if (!obj.id)
-      obj.id = Protocol.nextId()
+      obj.id = P.nextId()
     var line = JSON.stringify(obj) + "\n"
     if (root.oneshotMode || !helper.running) {
       root.enqueueOneshot(obj)
@@ -142,14 +140,14 @@ Item {
     root.helperCmd = root.helperSh
     root.lastStatus = "compat"
     helper.running = false
-    var abandoned = Protocol.abandonInFlight()
+    var abandoned = root.session().abandonInFlight()
     root.flushSendQueue()
     if (abandoned.queuedPreview)
       root.enqueueOneshot(abandoned.queuedPreview)
     if (abandoned.previewId && abandoned.previewPath) {
       root.applyLocalPreview(abandoned.previewId, abandoned.previewPath)
       root.enqueueOneshot({
-        id: Protocol.nextId(),
+        id: root.session().nextId(),
         cmd: "preview",
         path: abandoned.previewPath
       })
@@ -174,23 +172,21 @@ Item {
   }
 
   function dispatchPending() {
-    var nextPrev = Protocol.takeReadyPreview()
+    var P = root.session()
+    var nextPrev = P.takeReadyPreview()
     if (nextPrev)
       root.send(nextPrev)
-    var nextPref = Protocol.takeReadyPrefetch()
+    var nextPref = P.takeReadyPrefetch()
     if (nextPref)
       root.send(nextPref)
   }
 
   function applyLocalPreview(id, path) {
-    Protocol.dropInFlight(id)
+    root.session().dropInFlight(id)
     root.lastPreview = Format.localPreview(path)
     root.previewRevision += 1
     root.dispatchPending()
   }
-
-  property var oneshotQueue: []
-  property var oneshotCurrent: null
 
   function runOneshot() {
     if (oneshotProc.running || root.oneshotCurrent)
@@ -204,12 +200,13 @@ Item {
 
   function onHelperLine(line) {
     root.lastLine = String(line || "")
-    var msg = Protocol.parseLine(line)
+    var P = root.session()
+    var msg = P.parseLine(line)
     if (!msg)
       return
     root.stdinWorks = true
     if (msg.kind === "results") {
-      if (!Protocol.acceptQuery(msg))
+      if (!P.acceptQuery(msg))
         return
       root.lastResults = msg.results || []
       if (msg.indexing !== undefined)
@@ -220,15 +217,15 @@ Item {
         root.backend = String(msg.backend)
       root.resultsRevision += 1
     } else if (msg.kind === "preview") {
-      var cls = Protocol.slotClass(msg.id)
-      var inflightPath = Protocol.pathForInFlight(msg.id)
-      Protocol.classifyAndClear(msg.id)
+      var cls = P.slotClass(msg.id)
+      var inflightPath = P.pathForInFlight(msg.id)
+      P.classifyAndClear(msg.id)
       root.dispatchPending()
       if (cls === "prefetch")
         return
       if (msg.error === "stale" && !msg.preview)
         return
-      if (!Protocol.acceptForegroundPreview(msg))
+      if (!P.acceptForegroundPreview(msg))
         return
       root.lastPreview = msg.preview || Format.localPreview(inflightPath)
       root.previewRevision += 1
@@ -248,9 +245,9 @@ Item {
         root.backend = String(msg.status.backend)
       root.statusRevision += 1
     } else if (msg.kind === "error") {
-      var errPath = Protocol.pathForInFlight(msg.id)
-      var errClass = Protocol.slotClass(msg.id)
-      Protocol.dropInFlight(msg.id)
+      var errPath = P.pathForInFlight(msg.id)
+      var errClass = P.slotClass(msg.id)
+      P.dropInFlight(msg.id)
       root.lastStatus = "error:" + String(msg.error || "")
       if (errClass === "preview")
         root.applyLocalPreview(msg.id, errPath)
@@ -276,22 +273,22 @@ Item {
     if (root.helperDead && !helper.running && root.oneshotMode === false && !root.helperReady) {
       return root.localQuery(q)
     }
-    var req = Protocol.queryRequest(q)
+    var req = root.session().queryRequest(q)
     root.send(req)
     return req.id
   }
 
   function preview(path, page) {
-    var req = Protocol.previewRequest(path, page)
-    var ready = Protocol.queueOrStartPreview(req)
+    var req = root.session().previewRequest(path, page)
+    var ready = root.session().queueOrStartPreview(req)
     if (ready)
       root.send(ready)
     return req.id
   }
 
   function prefetch(path) {
-    var req = Protocol.prefetchRequest(path)
-    var ready = Protocol.queueOrStartPrefetch(req)
+    var req = root.session().prefetchRequest(path)
+    var ready = root.session().queueOrStartPrefetch(req)
     if (ready)
       root.send(ready)
     return req.id
@@ -299,84 +296,39 @@ Item {
 
   function openPath(path) {
     if (path)
-      root.send(Protocol.selectRequest(path))
-    return root.send(Protocol.openRequest(path))
+      root.send(root.session().selectRequest(path))
+    return root.send(root.session().openRequest(path))
   }
 
   function reveal(path) {
-    return root.send(Protocol.revealRequest(path))
+    return root.send(root.session().revealRequest(path))
   }
 
   function select(path) {
-    return root.send(Protocol.selectRequest(path))
+    return root.send(root.session().selectRequest(path))
   }
 
   function setTheme(palette) {
-    return root.send(Protocol.themeRequest(palette))
+    return root.send(root.session().themeRequest(palette))
   }
 
   function pushConfig() {
-    var snap = Config.snapshot()
-    return root.send(Protocol.configRequest(snap))
+    return root.send(root.session().configRequest(Config.snapshot()))
   }
 
   function warmup() {
-    return root.send(Protocol.warmupRequest())
+    return root.send(root.session().warmupRequest())
   }
 
   function requestStatus() {
-    return root.send(Protocol.statusRequest())
+    return root.send(root.session().statusRequest())
   }
 
-  function statusJson() {
-    return JSON.stringify({
-      id: root.pluginId,
-      helper: root.helperCmd,
-      helperIsBinary: root.helperIsBinary,
-      helperDead: root.helperDead,
-      oneshot: root.oneshotMode,
-      backend: root.backend,
-      indexing: root.indexing,
-      progress: root.indexProgress,
-      results: root.lastResults.length,
-      caps: root.lastCaps,
-      status: root.lastStatus
-    })
-  }
-
-  function summonOverlay(payload) {
-    var body = payload || "{}"
-    if (shell && typeof shell.summon === "function") {
-      shell.summon(root.pluginId, body)
-      return "ok"
-    }
-    Quickshell.execDetached(["omarchy-shell", "shell", "summon", root.pluginId, body])
+  function markFirstRun() {
+    Config.markFirstRunShown()
+    uiFile.setText(Config.serializeUi())
     return "ok"
   }
-
-  function hideOverlay() {
-    if (shell && typeof shell.hide === "function") {
-      shell.hide(root.pluginId)
-      return "ok"
-    }
-    Quickshell.execDetached(["omarchy-shell", "shell", "hide", root.pluginId])
-    return "ok"
-  }
-
-  function toggleOverlay(payload) {
-    if (shell && typeof shell.toggle === "function") {
-      shell.toggle(root.pluginId, payload || "{}")
-      return "ok"
-    }
-    Quickshell.execDetached(["omarchy-shell", "shell", "toggle", root.pluginId, payload || "{}"])
-    return "ok"
-  }
-
-  function ping() { return "ok" }
-  function status() { return root.statusJson() }
-  function open(path) { return String(root.openPath(path)) }
-  function previewPath(path) { return String(root.preview(path, 1)) }
-  function search(q) { return String(root.query(q)) }
 
   function startHelper() {
     helper.command = [root.helperCommand()]
@@ -437,7 +389,7 @@ Item {
       } else if (job && job.cmd === "query") {
         root.localQuery(job.q || "")
       } else if (job && job.cmd === "prefetch") {
-        Protocol.dropInFlight(job.id)
+        root.session().dropInFlight(job.id)
         root.dispatchPending()
       } else if (job && (job.cmd === "preview" || job.cmd === "page")) {
         root.applyLocalPreview(job.id, job.path)
@@ -502,35 +454,6 @@ Item {
     }
   }
 
-  IpcHandler {
-    target: "io.github.chris.quicklook"
-
-    function ping(arg: string): string { return "ok" }
-    function status(arg: string): string { return root.statusJson() }
-    function query(q: string): string { return String(root.query(q)) }
-    function preview(path: string): string { return String(root.preview(path, 1)) }
-    function open(path: string): string { return String(root.openPath(path)) }
-    function reveal(path: string): string { return String(root.reveal(path)) }
-    function warmup(arg: string): string { root.warmup(); return "ok" }
-    function summon(arg: string): string { return root.summonOverlay(arg && arg.length ? arg : "{}") }
-    function hide(arg: string): string { return root.hideOverlay() }
-    function toggle(arg: string): string { return root.toggleOverlay(arg && arg.length ? arg : "{}") }
-    function configure(json: string): string {
-      try {
-        Config.applyInline(JSON.parse(json), root.home)
-        root.pushConfig()
-      } catch (e) {}
-      return "ok"
-    }
-    function markFirstRun(arg: string): string { return root.markFirstRun() }
-  }
-
-  function markFirstRun() {
-    Config.markFirstRunShown()
-    uiFile.setText(Config.serializeUi())
-    return "ok"
-  }
-
   FileView {
     id: uiFile
     path: root.stateDir + "/ui.json"
@@ -549,8 +472,8 @@ Item {
   }
 
   Component.onCompleted: {
+    root.proto = Protocol.createSession()
     root.applyHostSettings()
-    Protocol.reset()
     mkdirState.running = true
     whichProc.running = true
   }

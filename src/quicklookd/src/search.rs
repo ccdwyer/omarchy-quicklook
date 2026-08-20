@@ -222,18 +222,7 @@ pub fn plocate(query: &str, limit: usize, extra: &[String], roots: &[PathBuf]) -
     let mut out = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let path = PathBuf::from(line);
-        if !exclude::normalize_components(&path) {
-            continue;
-        }
-        if exclude::path_is_secret(&path) {
-            continue;
-        }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if exclude::skip_dir_name(name, extra) {
-                continue;
-            }
-        }
-        if !roots.is_empty() && !exclude::under_root(&path, roots) {
+        if exclude::should_skip_located(&path, extra, roots) {
             continue;
         }
         if let Some(rec) = IndexedFile::from_path(&path) {

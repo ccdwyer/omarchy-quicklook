@@ -8,9 +8,9 @@ Conservative choices where the Omarchy / Quickshell / Hyprland API was not 100% 
 - **`keepLoaded: true`** is set on the manifest even though the spec JSON block omitted it. The platform reference says plugins that must outlive a single summon (this overlay) should set it. Spec kinds/entryPoints are otherwise exact.
 - **Injected properties** on load: `omarchyPath`, `shell`, `manifest`, `pluginRegistry`. Overlay and Service still function if some of these are missing.
 - **Settings are inline on the `shell.json` plugins[] entry.** Service declares `roots`, `watchCap`, `cacheMb`, `maxFiles`, `extraExclude` plus an optional `pluginSettings` object. If the host copies entry fields onto the Item, they flow to the helper via a `config` command *before* indexing starts. There is no plugin-owned settings file. Runtime UI state (`firstRunShown`) is `~/.local/state/quicklook/ui.json`, not a settings file.
-- **Third-party service lookup is not first-party `shell.firstPartyServiceFor`.** Overlay tries, in order: `pluginRegistry.serviceFor`, `shell.serviceFor`, `shell.firstPartyServiceFor`, then degrades to the demo corpus + `gio open`.
-- **IPC verb** is `omarchy-shell shell call <id> <method> <arg>` and `shell summon <id> <payloadJson>`. README examples always pass `<arg>` (empty string when unused). We do not write `hyprland.conf`.
-- **`IpcHandler` target** is the plugin id. `shell call` is the primary path; IpcHandler is extra.
+- **Overlay owns the helper.** `HelperClient.qml` is instantiated by the overlay and speaks documented NDJSON / `--oneshot` to `bin/quicklookd` or `compat/`. There is no `pluginRegistry.serviceFor`, `shell.serviceFor`, or `shell.firstPartyServiceFor` — a conforming Quattro host without those invented lookups still searches and previews via the colocated helper.
+- **IPC verb** is `omarchy-shell shell call <id> <method> <arg>` and `shell summon <id> <payloadJson>`. Every `IpcHandler` method takes the required string argument (empty when unused). README examples always pass `<arg>`. We do not write `hyprland.conf`.
+- **`IpcHandler` target** is the plugin id. `shell call` is the documented path for CLI/file-manager actions; the overlay does not depend on it for search/preview.
 
 ## Quickshell
 

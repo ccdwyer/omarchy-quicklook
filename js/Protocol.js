@@ -277,3 +277,192 @@ function selectRequest(path) {
 function warmupRequest() {
   return { id: nextId(), cmd: "warmup" }
 }
+
+function createSession() {
+  var s = {
+    lastId: 0,
+    lastAcceptedQueryId: 0,
+    lastAcceptedPreviewId: 0,
+    inFlightPreview: 0,
+    inFlightPrefetch: 0,
+    inFlightPreviewPath: "",
+    inFlightPrefetchPath: "",
+    pendingPreview: null,
+    pendingPrefetch: null
+  }
+  function abandon() {
+    var snapshot = {
+      previewId: s.inFlightPreview,
+      previewPath: s.inFlightPreviewPath,
+      prefetchId: s.inFlightPrefetch,
+      prefetchPath: s.inFlightPrefetchPath,
+      queuedPreview: s.pendingPreview,
+      queuedPrefetch: s.pendingPrefetch
+    }
+    s.inFlightPreview = 0
+    s.inFlightPrefetch = 0
+    s.inFlightPreviewPath = ""
+    s.inFlightPrefetchPath = ""
+    s.pendingPreview = null
+    s.pendingPrefetch = null
+    return snapshot
+  }
+  function nid() {
+    s.lastId += 1
+    return s.lastId
+  }
+  function clsOf(id) {
+    var n = Number(id) || 0
+    if (n > 0 && s.inFlightPreview === n)
+      return "preview"
+    if (n > 0 && s.inFlightPrefetch === n)
+      return "prefetch"
+    return ""
+  }
+  function clear(id) {
+    var n = Number(id) || 0
+    if (s.inFlightPreview === n) {
+      s.inFlightPreview = 0
+      s.inFlightPreviewPath = ""
+    }
+    if (s.inFlightPrefetch === n) {
+      s.inFlightPrefetch = 0
+      s.inFlightPrefetchPath = ""
+    }
+  }
+  return {
+    reset: function() {
+      s.lastId = 0
+      s.lastAcceptedQueryId = 0
+      s.lastAcceptedPreviewId = 0
+      abandon()
+    },
+    abandonInFlight: abandon,
+    nextId: nid,
+    parseLine: parseLine,
+    isStale: isStale,
+    acceptQuery: function(msg) {
+      if (!msg || msg.kind !== "results")
+        return false
+      if (isStale(s.lastAcceptedQueryId, msg.id))
+        return false
+      s.lastAcceptedQueryId = Number(msg.id) || 0
+      return true
+    },
+    slotClass: clsOf,
+    classifyAndClear: function(id) {
+      var cls = clsOf(id)
+      clear(id)
+      return cls
+    },
+    acceptForegroundPreview: function(msg) {
+      if (!msg || msg.kind !== "preview")
+        return false
+      if (isStale(s.lastAcceptedPreviewId, msg.id))
+        return false
+      s.lastAcceptedPreviewId = Number(msg.id) || 0
+      return true
+    },
+    canStartPreview: function() { return s.inFlightPreview === 0 },
+    canStartPrefetch: function() { return s.inFlightPrefetch === 0 },
+    markPreview: function(id, path) {
+      s.inFlightPreview = Number(id) || 0
+      s.inFlightPreviewPath = String(path || "")
+    },
+    markPrefetch: function(id, path) {
+      s.inFlightPrefetch = Number(id) || 0
+      s.inFlightPrefetchPath = String(path || "")
+    },
+    dropInFlight: clear,
+    pathForInFlight: function(id) {
+      var n = Number(id) || 0
+      if (s.inFlightPreview === n)
+        return s.inFlightPreviewPath
+      if (s.inFlightPrefetch === n)
+        return s.inFlightPrefetchPath
+      return ""
+    },
+    queueOrStartPreview: function(req) {
+      if (!req)
+        return null
+      if (s.inFlightPreview === 0) {
+        s.inFlightPreview = Number(req.id) || 0
+        s.inFlightPreviewPath = String(req.path || "")
+        return req
+      }
+      s.pendingPreview = req
+      return null
+    },
+    queueOrStartPrefetch: function(req) {
+      if (!req)
+        return null
+      if (s.inFlightPrefetch === 0) {
+        s.inFlightPrefetch = Number(req.id) || 0
+        s.inFlightPrefetchPath = String(req.path || "")
+        return req
+      }
+      s.pendingPrefetch = req
+      return null
+    },
+    takeReadyPreview: function() {
+      if (s.inFlightPreview !== 0 || !s.pendingPreview)
+        return null
+      var req = s.pendingPreview
+      s.pendingPreview = null
+      s.inFlightPreview = Number(req.id) || 0
+      s.inFlightPreviewPath = String(req.path || "")
+      return req
+    },
+    takeReadyPrefetch: function() {
+      if (s.inFlightPrefetch !== 0 || !s.pendingPrefetch)
+        return null
+      var req = s.pendingPrefetch
+      s.pendingPrefetch = null
+      s.inFlightPrefetch = Number(req.id) || 0
+      s.inFlightPrefetchPath = String(req.path || "")
+      return req
+    },
+    queryRequest: function(q) {
+      return { id: nid(), cmd: "query", q: String(q || "") }
+    },
+    previewRequest: function(path, page) {
+      var req = { id: nid(), cmd: "preview", path: String(path || "") }
+      if (page !== undefined && page !== null)
+        req.page = Number(page) || 1
+      return req
+    },
+    prefetchRequest: function(path) {
+      return { id: nid(), cmd: "prefetch", path: String(path || "") }
+    },
+    statusRequest: function() { return { id: nid(), cmd: "status" } },
+    themeRequest: function(palette) {
+      return { id: nid(), cmd: "theme", palette: palette || {} }
+    },
+    configRequest: function(cfg) {
+      var req = { id: nid(), cmd: "config" }
+      if (!cfg)
+        return req
+      if (cfg.roots)
+        req.roots = cfg.roots
+      if (cfg.watchCap !== undefined)
+        req.watchCap = cfg.watchCap
+      if (cfg.cacheMb !== undefined)
+        req.cacheMb = cfg.cacheMb
+      if (cfg.maxFiles !== undefined)
+        req.maxFiles = cfg.maxFiles
+      if (cfg.extraExclude)
+        req.extraExclude = cfg.extraExclude
+      return req
+    },
+    openRequest: function(path) {
+      return { id: nid(), cmd: "open", path: String(path || "") }
+    },
+    revealRequest: function(path) {
+      return { id: nid(), cmd: "reveal", path: String(path || "") }
+    },
+    selectRequest: function(path) {
+      return { id: nid(), cmd: "select", path: String(path || "") }
+    },
+    warmupRequest: function() { return { id: nid(), cmd: "warmup" } }
+  }
+}
