@@ -247,6 +247,7 @@ Item {
               anchors.fill: parent
               anchors.margins: 6
               text: String(modelData || "")
+              textFormat: Text.PlainText
               color: root.accent
               elide: Text.ElideRight
               font.family: root.fontFamily
@@ -279,6 +280,7 @@ Item {
                 width: Math.max(80, parent.width / Math.max(1, (preview.headers || []).length))
                 height: parent.height
                 text: (row && index < row.length) ? String(row[index]) : ""
+                textFormat: Text.PlainText
                 color: root.foreground
                 elide: Text.ElideRight
                 verticalAlignment: Text.AlignVCenter
