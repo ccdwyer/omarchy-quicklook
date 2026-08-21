@@ -331,6 +331,7 @@ Item {
         }
         Text {
           text: modelData.name
+          textFormat: Text.PlainText
           color: root.foreground
           width: parent.width - Style.space(100)
           elide: Text.ElideRight

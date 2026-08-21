@@ -623,6 +623,7 @@ Item {
                   Text {
                     width: parent.width
                     text: modelData.name
+                    textFormat: Text.PlainText
                     color: index === root.selectedIndex ? root.selectedText : root.foreground
                     elide: Text.ElideMiddle
                     font.family: root.fontFamily
@@ -632,6 +633,7 @@ Item {
                   Text {
                     width: parent.width
                     text: Format.dirname(modelData.path)
+                    textFormat: Text.PlainText
                     color: index === root.selectedIndex ? root.selectedText : root.foreground
                     opacity: 0.55
                     elide: Text.ElideMiddle
